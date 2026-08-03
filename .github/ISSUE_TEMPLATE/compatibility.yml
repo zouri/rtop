@@ -1,0 +1,74 @@
+name: Platform compatibility report
+description: Report a Rockchip board, kernel or driver compatibility problem
+title: "[compat] "
+labels:
+  - compatibility
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Run rtop doctor --json, review it for environment details, and paste it below.
+
+  - type: input
+    id: version
+    attributes:
+      label: rtop version
+      placeholder: v0.1.0 or commit
+    validations:
+      required: true
+
+  - type: input
+    id: board
+    attributes:
+      label: Board and SoC
+      placeholder: RK3588 board model
+    validations:
+      required: true
+
+  - type: input
+    id: kernel
+    attributes:
+      label: Kernel or BSP
+      placeholder: 6.1.118 or vendor BSP release
+    validations:
+      required: true
+
+  - type: dropdown
+    id: privileges
+    attributes:
+      label: User privileges
+      options:
+        - Regular user
+        - Root
+        - Both tested
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Doctor report
+      description: Paste rtop doctor --json output after reviewing it.
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional logs or node formats
+      description: Include only relevant, non-sensitive sysfs/debugfs samples.
