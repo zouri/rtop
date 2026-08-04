@@ -2,6 +2,24 @@ package model
 
 import "time"
 
+// CollectionScope selects the dynamic collector groups needed for a snapshot.
+type CollectionScope uint32
+
+const (
+	CollectCPU CollectionScope = 1 << iota
+	CollectMemory
+	CollectAccelerators
+	CollectProcesses
+	CollectThermals
+
+	CollectOverview = CollectCPU | CollectMemory | CollectAccelerators | CollectThermals
+	CollectAll      = CollectOverview | CollectProcesses
+)
+
+func (s CollectionScope) Includes(group CollectionScope) bool {
+	return group != 0 && s&group == group
+}
+
 // MetricStatus describes whether a metric can be trusted and displayed.
 type MetricStatus string
 

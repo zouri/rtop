@@ -38,16 +38,6 @@ func TestParseStatRejectsMalformedInput(t *testing.T) {
 	}
 }
 
-func TestParseStatus(t *testing.T) {
-	status, err := ParseStatus([]byte("VmRSS:\t20480 kB\nThreads:\t4\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if status.RSSBytes != 20*1024*1024 || status.Threads != 4 {
-		t.Fatalf("status = %#v", status)
-	}
-}
-
 func TestCollectorCalculatesCPUAndMemory(t *testing.T) {
 	root := filepath.Join("..", "..", "..", "testdata", "generic-linux")
 	base := sysfs.MustNew(root)
@@ -80,29 +70,18 @@ func TestCollectorCalculatesCPUAndMemory(t *testing.T) {
 	if *process.CPU.Value < 54.4 || *process.CPU.Value > 54.7 {
 		t.Fatalf("CPU = %f", *process.CPU.Value)
 	}
-	if process.Memory.Value == nil || *process.Memory.Value != 20 {
+	wantMemory := float64(100*os.Getpagesize()) / (1024 * 1024)
+	if process.Memory.Value == nil || *process.Memory.Value != wantMemory {
 		t.Fatalf("memory = %#v", process.Memory)
 	}
-	if process.Memory.Source != "/proc/100/status" {
+	if process.Memory.Source != "/proc/100/stat" {
 		t.Fatalf("memory source = %q", process.Memory.Source)
 	}
 	if process.Threads != 4 {
 		t.Fatalf("threads = %d", process.Threads)
 	}
-}
-
-func TestCollectorReportsStatSourceWhenStatusHasNoRSS(t *testing.T) {
-	root := filepath.Join("..", "..", "..", "testdata", "generic-linux")
-	systemFS := &statusWithoutRSSFS{SystemFS: sysfs.MustNew(root)}
-	processes, warnings := NewCollector(systemFS, time.Nanosecond).Collect(context.Background())
-	if len(warnings) != 0 {
-		t.Fatalf("warnings = %#v", warnings)
-	}
-	if len(processes) != 1 {
-		t.Fatalf("processes = %#v", processes)
-	}
-	if got := processes[0].Memory.Source; got != "/proc/100/stat" {
-		t.Fatalf("memory source = %q", got)
+	if fixture.reads["/proc/100/status"] != 0 {
+		t.Fatalf("status reads = %d, want 0", fixture.reads["/proc/100/status"])
 	}
 }
 
@@ -129,17 +108,6 @@ func TestBuildReturnsAllProcessesOrderedByPID(t *testing.T) {
 			t.Fatalf("processes[%d].PID = %d, want %d", i, process.PID, wantPID)
 		}
 	}
-}
-
-type statusWithoutRSSFS struct {
-	sysfs.SystemFS
-}
-
-func (f *statusWithoutRSSFS) ReadFile(path string) ([]byte, error) {
-	if path == "/proc/100/status" {
-		return []byte("Threads:\t4\n"), nil
-	}
-	return f.SystemFS.ReadFile(path)
 }
 
 type sequenceFS struct {

@@ -1,12 +1,14 @@
 package app
 
 import (
+	"container/heap"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -23,6 +25,15 @@ type runtimeConfig struct {
 	root              string
 	interval          time.Duration
 	cpuSampleDuration time.Duration
+	processInterval   time.Duration
+	thermalInterval   time.Duration
+}
+
+type snapshotOptions struct {
+	asJSON      bool
+	watch       bool
+	noProcesses bool
+	top         int
 }
 
 func NewCommand(version, commit, date string, stdout, stderr io.Writer) *cobra.Command {
@@ -30,6 +41,8 @@ func NewCommand(version, commit, date string, stdout, stderr io.Writer) *cobra.C
 		root:              "/",
 		interval:          time.Second,
 		cpuSampleDuration: 200 * time.Millisecond,
+		processInterval:   2 * time.Second,
+		thermalInterval:   5 * time.Second,
 	}
 	command := &cobra.Command{
 		Use:           "rtop",
@@ -48,7 +61,9 @@ func NewCommand(version, commit, date string, stdout, stderr io.Writer) *cobra.C
 	))
 	command.PersistentFlags().StringVar(&config.root, "root", config.root, "target system root (for fixtures and containers)")
 	command.PersistentFlags().DurationVar(&config.interval, "interval", config.interval, "TUI and snapshot watch refresh interval")
-	command.PersistentFlags().DurationVar(&config.cpuSampleDuration, "cpu-sample", config.cpuSampleDuration, "CPU usage sampling window")
+	command.PersistentFlags().DurationVar(&config.cpuSampleDuration, "cpu-sample", config.cpuSampleDuration, "initial CPU and process usage sampling window")
+	command.PersistentFlags().DurationVar(&config.processInterval, "process-interval", config.processInterval, "process collection interval")
+	command.PersistentFlags().DurationVar(&config.thermalInterval, "thermal-interval", config.thermalInterval, "thermal collection interval")
 
 	command.AddCommand(newInfoCommand(&config, stdout))
 	command.AddCommand(newSnapshotCommand(&config, stdout))
@@ -57,18 +72,30 @@ func NewCommand(version, commit, date string, stdout, stderr io.Writer) *cobra.C
 }
 
 func runTUI(ctx context.Context, config runtimeConfig, stdout io.Writer) error {
-	if err := validateSampling(config, true); err != nil {
+	if err := validateSampling(config, true, true); err != nil {
 		return err
 	}
 	systemFS, err := sysfs.New(config.root)
 	if err != nil {
 		return err
 	}
-	monitor := NewMonitor(systemFS, config.cpuSampleDuration)
+	monitor := NewMonitorWithIntervals(
+		systemFS, config.cpuSampleDuration, config.processInterval, config.thermalInterval,
+	)
+	monitor.SetCollectionScope(model.CollectOverview)
 	scheduler := NewScheduler(monitor.Snapshot, config.interval, periodicSnapshotTimeout(config))
 	tuiContext, cancel := context.WithCancel(ctx)
 	defer cancel()
-	return ui.Run(tuiContext, scheduler.Run(tuiContext), scheduler.Refresh, stdout)
+	refresh := func() {
+		monitor.ForceRefresh()
+		scheduler.Refresh()
+	}
+	scopeChanged := func(scope model.CollectionScope) {
+		monitor.SetCollectionScope(scope)
+		monitor.ForceRefresh()
+		scheduler.Refresh()
+	}
+	return ui.RunWithScope(tuiContext, scheduler.Run(tuiContext), refresh, scopeChanged, stdout)
 }
 
 func newInfoCommand(config *runtimeConfig, stdout io.Writer) *cobra.Command {
@@ -104,16 +131,22 @@ func newInfoCommand(config *runtimeConfig, stdout io.Writer) *cobra.Command {
 func newSnapshotCommand(config *runtimeConfig, stdout io.Writer) *cobra.Command {
 	var asJSON bool
 	var watch bool
+	var noProcesses bool
+	var top int
 	command := &cobra.Command{
 		Use:   "snapshot",
 		Short: "Collect a system snapshot",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
-			return runSnapshot(command.Context(), *config, stdout, asJSON || watch, watch)
+			return runSnapshot(command.Context(), *config, stdout, snapshotOptions{
+				asJSON: asJSON || watch, watch: watch, noProcesses: noProcesses, top: top,
+			})
 		},
 	}
 	command.Flags().BoolVar(&asJSON, "json", false, "output JSON")
 	command.Flags().BoolVarP(&watch, "watch", "w", false, "continuously output newline-delimited JSON snapshots")
+	command.Flags().BoolVar(&noProcesses, "no-processes", false, "omit process data and skip process collection")
+	command.Flags().IntVar(&top, "top", 0, "limit process output to the top N by CPU (0 keeps all)")
 	return command
 }
 
@@ -124,7 +157,7 @@ func newDoctorCommand(config *runtimeConfig, stdout io.Writer) *cobra.Command {
 		Short: "Diagnose platform detection, drivers, permissions and metric sources",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
-			if err := validateSampling(*config, false); err != nil {
+			if err := validateSampling(*config, false, true); err != nil {
 				return err
 			}
 			systemFS, err := sysfs.New(config.root)
@@ -143,40 +176,111 @@ func newDoctorCommand(config *runtimeConfig, stdout io.Writer) *cobra.Command {
 	return command
 }
 
-func runSnapshot(ctx context.Context, config runtimeConfig, stdout io.Writer, asJSON, watch bool) error {
-	if err := validateSampling(config, watch); err != nil {
+func runSnapshot(ctx context.Context, config runtimeConfig, stdout io.Writer, options snapshotOptions) error {
+	if options.top < 0 {
+		return errors.New("--top must be zero or greater")
+	}
+	if err := validateSampling(config, options.watch, !options.noProcesses); err != nil {
 		return err
 	}
 	systemFS, err := sysfs.New(config.root)
 	if err != nil {
 		return err
 	}
-	monitor := NewMonitor(systemFS, config.cpuSampleDuration)
-	if watch {
+	if options.watch {
+		monitor := NewMonitorWithIntervals(
+			systemFS, config.cpuSampleDuration, config.processInterval, config.thermalInterval,
+		)
+		if options.noProcesses {
+			monitor.DisableProcesses()
+		}
 		scheduler := NewScheduler(monitor.Snapshot, config.interval, periodicSnapshotTimeout(config))
 		for snapshot := range scheduler.Run(ctx) {
+			snapshot.Processes = topProcessesByCPU(snapshot.Processes, options.top)
 			if err := writeJSON(stdout, snapshot, false); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
+	monitor := NewMonitor(systemFS, config.cpuSampleDuration)
+	if options.noProcesses {
+		monitor.DisableProcesses()
+	}
 	snapshot := monitor.Snapshot(ctx)
-	if asJSON {
+	if options.asJSON {
+		snapshot.Processes = topProcessesByCPU(snapshot.Processes, options.top)
 		return writeJSON(stdout, snapshot, true)
 	}
 	printSnapshot(stdout, snapshot)
 	return nil
 }
 
-func validateSampling(config runtimeConfig, requireInterval bool) error {
+func validateSampling(config runtimeConfig, requireInterval, requireProcesses bool) error {
 	if requireInterval && config.interval <= 0 {
 		return errors.New("--interval must be greater than zero")
 	}
 	if config.cpuSampleDuration <= 0 {
 		return errors.New("--cpu-sample must be greater than zero")
 	}
+	if requireInterval && requireProcesses && config.processInterval <= 0 {
+		return errors.New("--process-interval must be greater than zero")
+	}
+	if requireInterval && config.thermalInterval <= 0 {
+		return errors.New("--thermal-interval must be greater than zero")
+	}
 	return nil
+}
+
+type processMinHeap []model.ProcessInfo
+
+func (h processMinHeap) Len() int           { return len(h) }
+func (h processMinHeap) Less(i, j int) bool { return processBetter(h[j], h[i]) }
+func (h processMinHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *processMinHeap) Push(value any)    { *h = append(*h, value.(model.ProcessInfo)) }
+func (h *processMinHeap) Pop() any {
+	old := *h
+	last := old[len(old)-1]
+	*h = old[:len(old)-1]
+	return last
+}
+
+func topProcessesByCPU(processes []model.ProcessInfo, limit int) []model.ProcessInfo {
+	if limit <= 0 || len(processes) == 0 {
+		return processes
+	}
+	limit = min(limit, len(processes))
+	selected := make(processMinHeap, 0, limit)
+	for _, process := range processes {
+		if len(selected) < limit {
+			heap.Push(&selected, process)
+			continue
+		}
+		if processBetter(process, selected[0]) {
+			selected[0] = process
+			heap.Fix(&selected, 0)
+		}
+	}
+	sort.Slice(selected, func(i, j int) bool {
+		return processBetter(selected[i], selected[j])
+	})
+	return []model.ProcessInfo(selected)
+}
+
+func processBetter(left, right model.ProcessInfo) bool {
+	leftCPU, rightCPU := processCPUValue(left), processCPUValue(right)
+	if leftCPU == rightCPU {
+		return left.PID < right.PID
+	}
+	return leftCPU > rightCPU
+}
+
+func processCPUValue(process model.ProcessInfo) float64 {
+	if process.CPU.Status != model.Available || process.CPU.Value == nil ||
+		math.IsNaN(*process.CPU.Value) || math.IsInf(*process.CPU.Value, 0) {
+		return -1
+	}
+	return *process.CPU.Value
 }
 
 func periodicSnapshotTimeout(config runtimeConfig) time.Duration {

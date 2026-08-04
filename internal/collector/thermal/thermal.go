@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"rtop/internal/model"
@@ -13,7 +14,18 @@ import (
 )
 
 type Collector struct {
-	fs sysfs.SystemFS
+	fs            sysfs.SystemFS
+	sensors       []sensor
+	probeWarnings []model.Warning
+	discoverOnce  sync.Once
+}
+
+type sensor struct {
+	name          string
+	typeName      string
+	path          string
+	component     string
+	warningSource string
 }
 
 func NewCollector(systemFS sysfs.SystemFS) *Collector {
@@ -21,91 +33,89 @@ func NewCollector(systemFS sysfs.SystemFS) *Collector {
 }
 
 func (c *Collector) Collect() ([]model.ThermalZone, []model.Warning) {
-	timestamp := time.Now()
-	var zones []model.ThermalZone
-	var warnings []model.Warning
-
-	thermalPaths, err := c.fs.Glob("/sys/class/thermal/thermal_zone*")
-	if err != nil {
-		warnings = append(warnings, model.Warning{Component: "thermal", Message: err.Error()})
-	}
-	for _, path := range thermalPaths {
-		zone, warning := c.readThermalZone(path, timestamp)
-		zones = append(zones, zone)
-		if warning != nil {
-			warnings = append(warnings, *warning)
-		}
-	}
-
-	hwmonPaths, err := c.fs.Glob("/sys/class/hwmon/hwmon*")
-	if err != nil {
-		warnings = append(warnings, model.Warning{Component: "hwmon", Message: err.Error()})
-	}
-	for _, path := range hwmonPaths {
-		found, foundWarnings := c.readHWMon(path, timestamp)
-		zones = append(zones, found...)
-		warnings = append(warnings, foundWarnings...)
-	}
-
-	sort.Slice(zones, func(i, j int) bool {
-		if zones[i].Type == zones[j].Type {
-			return zones[i].Name < zones[j].Name
-		}
-		return zones[i].Type < zones[j].Type
+	// Sensor paths and labels are stable on the embedded targets rtop monitors.
+	// Keep only temperature input reads on the recurring collection path.
+	c.discoverOnce.Do(func() {
+		c.sensors, c.probeWarnings = discover(c.fs)
 	})
-	if zones == nil {
-		zones = []model.ThermalZone{}
-	}
-	return zones, warnings
-}
-
-func (c *Collector) readThermalZone(path string, timestamp time.Time) (model.ThermalZone, *model.Warning) {
-	zoneType := filepath.Base(path)
-	if data, err := c.fs.ReadFile(filepath.Join(path, "type")); err == nil {
-		if value := strings.TrimSpace(string(data)); value != "" {
-			zoneType = value
-		}
-	}
-	temperature, err := c.readTemperature(filepath.Join(path, "temp"), timestamp)
-	zone := model.ThermalZone{Name: filepath.Base(path), Type: zoneType, Temperature: temperature}
-	if err != nil {
-		return zone, &model.Warning{Component: "thermal", Message: path + ": " + err.Error()}
-	}
-	return zone, nil
-}
-
-func (c *Collector) readHWMon(path string, timestamp time.Time) ([]model.ThermalZone, []model.Warning) {
-	chipName := filepath.Base(path)
-	if data, err := c.fs.ReadFile(filepath.Join(path, "name")); err == nil {
-		if value := strings.TrimSpace(string(data)); value != "" {
-			chipName = value
-		}
-	}
-	inputs, err := c.fs.Glob(filepath.Join(path, "temp[0-9]*_input"))
-	if err != nil {
-		return nil, []model.Warning{{Component: "hwmon", Message: path + ": " + err.Error()}}
-	}
-	var zones []model.ThermalZone
-	var warnings []model.Warning
-	for _, input := range inputs {
-		base := strings.TrimSuffix(filepath.Base(input), "_input")
-		label := base
-		if data, err := c.fs.ReadFile(filepath.Join(path, base+"_label")); err == nil {
-			if value := strings.TrimSpace(string(data)); value != "" {
-				label = value
-			}
-		}
-		temperature, readErr := c.readTemperature(input, timestamp)
+	timestamp := time.Now()
+	zones := make([]model.ThermalZone, 0, len(c.sensors))
+	warnings := append([]model.Warning(nil), c.probeWarnings...)
+	for _, sensor := range c.sensors {
+		temperature, err := c.readTemperature(sensor.path, timestamp)
 		zones = append(zones, model.ThermalZone{
-			Name: chipName + "/" + label, Type: "hwmon", Temperature: temperature,
+			Name: sensor.name, Type: sensor.typeName, Temperature: temperature,
 		})
-		if readErr != nil {
+		if err != nil {
 			warnings = append(warnings, model.Warning{
-				Component: "hwmon", Message: input + ": " + readErr.Error(),
+				Component: sensor.component, Message: sensor.warningSource + ": " + err.Error(),
 			})
 		}
 	}
 	return zones, warnings
+}
+
+func discover(systemFS sysfs.SystemFS) ([]sensor, []model.Warning) {
+	var sensors []sensor
+	var warnings []model.Warning
+	thermalPaths, err := systemFS.Glob("/sys/class/thermal/thermal_zone*")
+	if err != nil {
+		warnings = append(warnings, model.Warning{Component: "thermal", Message: err.Error()})
+	}
+	for _, path := range thermalPaths {
+		zoneType := filepath.Base(path)
+		if data, readErr := systemFS.ReadFile(filepath.Join(path, "type")); readErr == nil {
+			if value := strings.TrimSpace(string(data)); value != "" {
+				zoneType = value
+			}
+		}
+		sensors = append(sensors, sensor{
+			name: filepath.Base(path), typeName: zoneType,
+			path: filepath.Join(path, "temp"), component: "thermal", warningSource: path,
+		})
+	}
+
+	hwmonPaths, err := systemFS.Glob("/sys/class/hwmon/hwmon*")
+	if err != nil {
+		warnings = append(warnings, model.Warning{Component: "hwmon", Message: err.Error()})
+	}
+	for _, path := range hwmonPaths {
+		chipName := filepath.Base(path)
+		if data, readErr := systemFS.ReadFile(filepath.Join(path, "name")); readErr == nil {
+			if value := strings.TrimSpace(string(data)); value != "" {
+				chipName = value
+			}
+		}
+		inputs, globErr := systemFS.Glob(filepath.Join(path, "temp[0-9]*_input"))
+		if globErr != nil {
+			warnings = append(warnings, model.Warning{Component: "hwmon", Message: path + ": " + globErr.Error()})
+			continue
+		}
+		for _, input := range inputs {
+			base := strings.TrimSuffix(filepath.Base(input), "_input")
+			label := base
+			if data, readErr := systemFS.ReadFile(filepath.Join(path, base+"_label")); readErr == nil {
+				if value := strings.TrimSpace(string(data)); value != "" {
+					label = value
+				}
+			}
+			sensors = append(sensors, sensor{
+				name: chipName + "/" + label, typeName: "hwmon", path: input,
+				component: "hwmon", warningSource: input,
+			})
+		}
+	}
+
+	sort.Slice(sensors, func(i, j int) bool {
+		if sensors[i].typeName == sensors[j].typeName {
+			return sensors[i].name < sensors[j].name
+		}
+		return sensors[i].typeName < sensors[j].typeName
+	})
+	if sensors == nil {
+		sensors = []sensor{}
+	}
+	return sensors, warnings
 }
 
 func (c *Collector) readTemperature(path string, timestamp time.Time) (model.Metric, error) {

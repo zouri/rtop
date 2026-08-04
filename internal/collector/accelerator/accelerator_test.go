@@ -19,7 +19,7 @@ func TestCollectorFromKernel61Fixture(t *testing.T) {
 	}
 	assertMetric(t, accelerators[0].Usage, 12)
 	assertMetric(t, accelerators[0].Frequency, 1000)
-	assertMetric(t, accelerators[1].Usage, 60)
+	assertMetric(t, accelerators[1].Usage, 20)
 	assertMetric(t, accelerators[1].Frequency, 900)
 	assertMetric(t, accelerators[2].Usage, 28)
 	assertMetric(t, accelerators[2].Frequency, 528)
@@ -36,6 +36,7 @@ func TestCollectorFromBSP510Fixture(t *testing.T) {
 	}
 	assertMetric(t, accelerators[0].Usage, 35)
 	assertMetric(t, accelerators[0].Frequency, 800)
+	assertMetric(t, accelerators[1].Usage, 15)
 	assertMetric(t, accelerators[1].Frequency, 800)
 	if accelerators[2].Usage.Status != model.Unsupported {
 		t.Fatalf("DDR usage = %#v", accelerators[2].Usage)
@@ -102,8 +103,54 @@ func TestCollectorPreservesPermissionDenied(t *testing.T) {
 			t.Fatalf("core = %#v", core)
 		}
 	}
-	if accelerators[1].Usage.Status != model.Available {
-		t.Fatalf("aggregate NPU usage = %#v", accelerators[1].Usage)
+	assertMetric(t, accelerators[1].Usage, 60)
+}
+
+func TestCollectorTreatsRuntimeSuspendedNPUAsIdle(t *testing.T) {
+	root := filepath.Join("..", "..", "..", "testdata", "rk3588-kernel61")
+	tracked := &suspendedNPUFS{SystemFS: sysfs.MustNew(root)}
+	collector := NewCollector(tracked)
+	tracked.watchDynamicReads = true
+
+	accelerators, warnings := collector.Collect()
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %#v", warnings)
+	}
+	npu := accelerators[1]
+	assertMetric(t, npu.Usage, 0)
+	if npu.Frequency.Status != model.Stale || npu.Frequency.Value != nil {
+		t.Fatalf("NPU frequency = %#v", npu.Frequency)
+	}
+	if len(npu.Cores) != 3 {
+		t.Fatalf("NPU cores = %#v", npu.Cores)
+	}
+	for _, core := range npu.Cores {
+		assertMetric(t, core.Usage, 0)
+	}
+	if tracked.runtimeStatusReads != 1 {
+		t.Fatalf("runtime status reads = %d, want 1", tracked.runtimeStatusReads)
+	}
+	if len(tracked.dynamicReads) != 0 {
+		t.Fatalf("read stale NPU metrics while suspended: %v", tracked.dynamicReads)
+	}
+}
+
+func TestAggregateCoreUsageRequiresEveryCore(t *testing.T) {
+	timestamp := time.Now()
+	cores := []model.AcceleratorCore{
+		{ID: 0, Usage: model.AvailableMetric(10, "%", "debugfs", timestamp)},
+		{ID: 1, Usage: model.AvailableMetric(20, "%", "debugfs", timestamp)},
+		{ID: 2, Usage: model.AvailableMetric(30, "%", "debugfs", timestamp)},
+	}
+	metric, ok := aggregateCoreUsage(cores, timestamp)
+	if !ok {
+		t.Fatal("aggregateCoreUsage reported unavailable")
+	}
+	assertMetric(t, metric, 20)
+
+	cores[1].Usage = model.MissingMetric(model.Unavailable, "%", "debugfs", "missing", timestamp)
+	if _, ok := aggregateCoreUsage(cores, timestamp); ok {
+		t.Fatal("aggregateCoreUsage accepted an unavailable core")
 	}
 }
 
@@ -139,4 +186,40 @@ func (f *permissionFS) ReadFile(path string) ([]byte, error) {
 		return nil, os.ErrPermission
 	}
 	return f.SystemFS.ReadFile(path)
+}
+
+type suspendedNPUFS struct {
+	sysfs.SystemFS
+	watchDynamicReads  bool
+	runtimeStatusReads int
+	dynamicReads       []string
+}
+
+func (f *suspendedNPUFS) ReadFile(path string) ([]byte, error) {
+	if strings.HasSuffix(path, "/device/power/runtime_status") {
+		if f.watchDynamicReads {
+			f.runtimeStatusReads++
+		}
+		return []byte("suspended\n"), nil
+	}
+	if f.watchDynamicReads && isNPUDynamicPath(path) {
+		f.dynamicReads = append(f.dynamicReads, path)
+	}
+	return f.SystemFS.ReadFile(path)
+}
+
+func isNPUDynamicPath(path string) bool {
+	if strings.HasPrefix(path, "/sys/kernel/debug/rknpu/") {
+		return true
+	}
+	if !strings.Contains(path, "/fdab0000.npu/") {
+		return false
+	}
+	base := filepath.Base(path)
+	switch base {
+	case "load", "utilization", "utilisation", "busy_time", "total_time", "cur_freq", "target_freq":
+		return true
+	default:
+		return false
+	}
 }

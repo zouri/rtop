@@ -2,7 +2,6 @@ package ui
 
 import (
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -292,19 +291,7 @@ func (m Model) engineHistory(acceleratorType string) []float64 {
 }
 
 func (m Model) renderProcesses(height int) string {
-	processes := append([]model.ProcessInfo(nil), m.latest.Processes...)
-	sort.SliceStable(processes, func(i, j int) bool {
-		var left, right float64
-		if m.processSort == sortMemory {
-			left, right = metricNumber(processes[i].Memory), metricNumber(processes[j].Memory)
-		} else {
-			left, right = metricNumber(processes[i].CPU), metricNumber(processes[j].CPU)
-		}
-		if left == right {
-			return processes[i].PID < processes[j].PID
-		}
-		return left > right
-	})
+	processes := m.processes
 	if len(processes) == 0 {
 		return mutedStyle.Render("No readable processes")
 	}

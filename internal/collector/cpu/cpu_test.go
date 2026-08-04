@@ -59,7 +59,8 @@ func TestCollectorUsesTwoSamplesAndReadsFrequency(t *testing.T) {
 		t.Fatal(err)
 	}
 	systemFS := &sequenceFS{SystemFS: base, nextStat: next}
-	info, warnings := NewCollector(systemFS, time.Nanosecond).Collect(context.Background())
+	collector := NewCollector(systemFS, time.Nanosecond)
+	info, warnings := collector.Collect(context.Background())
 	if len(warnings) != 0 {
 		t.Fatalf("unexpected warnings: %#v", warnings)
 	}
@@ -75,6 +76,43 @@ func TestCollectorUsesTwoSamplesAndReadsFrequency(t *testing.T) {
 	if info.Cores[1].Frequency.Value == nil || *info.Cores[1].Frequency.Value != 2208 {
 		t.Fatalf("frequency = %#v", info.Cores[1].Frequency)
 	}
+	if systemFS.statReads != 2 {
+		t.Fatalf("first collection read %s %d times, want 2", procStatPath, systemFS.statReads)
+	}
+	collector.Collect(context.Background())
+	if systemFS.statReads != 3 {
+		t.Fatalf("second collection read %s %d total times, want 3", procStatPath, systemFS.statReads)
+	}
+	collector.Reset()
+	collector.Collect(context.Background())
+	if systemFS.statReads != 5 {
+		t.Fatalf("collection after reset read %s %d total times, want 5", procStatPath, systemFS.statReads)
+	}
+}
+
+func TestCollectorCachesFrequencyTopology(t *testing.T) {
+	root := filepath.Join("..", "..", "..", "testdata", "generic-linux")
+	systemFS := &countingFS{SystemFS: sysfs.MustNew(root)}
+	collector := NewCollector(systemFS, time.Nanosecond)
+	if systemFS.globCalls != 0 || systemFS.maxFrequencyReads != 0 {
+		t.Fatal("collector construction eagerly discovered CPU topology")
+	}
+
+	collector.Collect(context.Background())
+	if systemFS.globCalls != 3 {
+		t.Fatalf("topology discovery glob calls = %d, want 3", systemFS.globCalls)
+	}
+	if systemFS.maxFrequencyReads != 2 {
+		t.Fatalf("maximum frequency reads = %d, want 2", systemFS.maxFrequencyReads)
+	}
+
+	collector.Collect(context.Background())
+	if systemFS.globCalls != 3 {
+		t.Fatalf("collection repeated topology discovery: glob calls = %d", systemFS.globCalls)
+	}
+	if systemFS.maxFrequencyReads != 2 {
+		t.Fatalf("collection repeated maximum frequency reads: %d", systemFS.maxFrequencyReads)
+	}
 }
 
 type sequenceFS struct {
@@ -83,10 +121,28 @@ type sequenceFS struct {
 	nextStat  []byte
 }
 
+type countingFS struct {
+	sysfs.SystemFS
+	globCalls         int
+	maxFrequencyReads int
+}
+
+func (f *countingFS) Glob(pattern string) ([]string, error) {
+	f.globCalls++
+	return f.SystemFS.Glob(pattern)
+}
+
+func (f *countingFS) ReadFile(path string) ([]byte, error) {
+	if filepath.Base(path) == "cpuinfo_max_freq" {
+		f.maxFrequencyReads++
+	}
+	return f.SystemFS.ReadFile(path)
+}
+
 func (f *sequenceFS) ReadFile(path string) ([]byte, error) {
 	if path == procStatPath {
 		f.statReads++
-		if f.statReads == 2 {
+		if f.statReads >= 2 {
 			return f.nextStat, nil
 		}
 	}

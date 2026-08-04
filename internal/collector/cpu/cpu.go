@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"rtop/internal/model"
@@ -91,6 +92,11 @@ func Usage(previous, current Times) (float64, error) {
 type Collector struct {
 	fs             sysfs.SystemFS
 	sampleDuration time.Duration
+	frequencyPaths map[int]string
+	clusters       map[int]string
+	topologyOnce   sync.Once
+	mu             sync.Mutex
+	previous       map[string]Times
 }
 
 func NewCollector(systemFS sysfs.SystemFS, sampleDuration time.Duration) *Collector {
@@ -100,16 +106,34 @@ func NewCollector(systemFS sysfs.SystemFS, sampleDuration time.Duration) *Collec
 	return &Collector{fs: systemFS, sampleDuration: sampleDuration}
 }
 
+// Reset discards the delta baseline so the next collection takes a fresh
+// short-window sample. It is used when CPU collection is re-enabled after the
+// user spent time on a page that did not need CPU data.
+func (c *Collector) Reset() {
+	c.mu.Lock()
+	c.previous = nil
+	c.mu.Unlock()
+}
+
 func (c *Collector) Collect(ctx context.Context) (model.CPUInfo, []model.Warning) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	started := time.Now()
-	firstData, err := c.fs.ReadFile(procStatPath)
+	if err := ctx.Err(); err != nil {
+		return c.unavailableCPU(started, err), []model.Warning{{
+			Component: "cpu",
+			Message:   err.Error(),
+		}}
+	}
+	currentData, err := c.fs.ReadFile(procStatPath)
 	if err != nil {
 		return c.unavailableCPU(started, err), []model.Warning{{
 			Component: "cpu",
 			Message:   procStatPath + ": " + err.Error(),
 		}}
 	}
-	first, err := ParseStat(firstData)
+	current, err := ParseStat(currentData)
 	if err != nil {
 		return c.unavailableCPU(started, err), []model.Warning{{
 			Component: "cpu",
@@ -117,39 +141,48 @@ func (c *Collector) Collect(ctx context.Context) (model.CPUInfo, []model.Warning
 		}}
 	}
 
-	timer := time.NewTimer(c.sampleDuration)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return c.unavailableCPU(time.Now(), ctx.Err()), []model.Warning{{
-			Component: "cpu",
-			Message:   ctx.Err().Error(),
-		}}
-	case <-timer.C:
-	}
+	previous := c.previous
+	if previous == nil {
+		timer := time.NewTimer(c.sampleDuration)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			c.previous = current
+			return c.unavailableCPU(time.Now(), ctx.Err()), []model.Warning{{
+				Component: "cpu",
+				Message:   ctx.Err().Error(),
+			}}
+		case <-timer.C:
+		}
 
-	secondData, err := c.fs.ReadFile(procStatPath)
-	if err != nil {
-		return c.unavailableCPU(time.Now(), err), []model.Warning{{
-			Component: "cpu",
-			Message:   procStatPath + ": " + err.Error(),
-		}}
+		previous = current
+		currentData, err = c.fs.ReadFile(procStatPath)
+		if err != nil {
+			c.previous = previous
+			return c.unavailableCPU(time.Now(), err), []model.Warning{{
+				Component: "cpu",
+				Message:   procStatPath + ": " + err.Error(),
+			}}
+		}
+		current, err = ParseStat(currentData)
+		if err != nil {
+			c.previous = previous
+			return c.unavailableCPU(time.Now(), err), []model.Warning{{
+				Component: "cpu",
+				Message:   "parse " + procStatPath + ": " + err.Error(),
+			}}
+		}
 	}
-	second, err := ParseStat(secondData)
-	if err != nil {
-		return c.unavailableCPU(time.Now(), err), []model.Warning{{
-			Component: "cpu",
-			Message:   "parse " + procStatPath + ": " + err.Error(),
-		}}
-	}
+	c.previous = current
 
 	timestamp := time.Now()
 	info := model.CPUInfo{
-		Overall: usageMetric(first["cpu"], second["cpu"], timestamp),
+		Overall: usageMetric(previous["cpu"], current["cpu"], timestamp),
 	}
-	frequencies, clusters := c.readFrequencies(timestamp)
-	coreNames := make([]string, 0, len(second))
-	for name := range second {
+	c.ensureTopology()
+	frequencies := c.readFrequencies(timestamp)
+	coreNames := make([]string, 0, len(current))
+	for name := range current {
 		if isCPUCore(name) {
 			coreNames = append(coreNames, name)
 		}
@@ -160,18 +193,26 @@ func (c *Collector) Collect(ctx context.Context) (model.CPUInfo, []model.Warning
 	for _, name := range coreNames {
 		id := coreID(name)
 		usage := model.MissingMetric(model.Unavailable, "%", procStatPath, "previous sample unavailable", timestamp)
-		if previous, ok := first[name]; ok {
-			usage = usageMetric(previous, second[name], timestamp)
+		if previousTimes, ok := previous[name]; ok {
+			usage = usageMetric(previousTimes, current[name], timestamp)
 		}
 		frequency, ok := frequencies[id]
 		if !ok {
 			frequency = model.MissingMetric(model.Unsupported, "MHz", cpuFreqBase(id), "cpufreq is not exposed", timestamp)
 		}
 		info.Cores = append(info.Cores, model.CPUCore{
-			ID: id, Cluster: clusters[id], Usage: usage, Frequency: frequency,
+			ID: id, Cluster: c.clusters[id], Usage: usage, Frequency: frequency,
 		})
 	}
 	return info, nil
+}
+
+func (c *Collector) ensureTopology() {
+	// Frequency paths, maximum frequencies and cluster membership are topology
+	// metadata; only the current frequency value needs sampling every refresh.
+	c.topologyOnce.Do(func() {
+		c.frequencyPaths, c.clusters = discoverFrequencyTopology(c.fs)
+	})
 }
 
 func (c *Collector) unavailableCPU(timestamp time.Time, err error) model.CPUInfo {
@@ -184,32 +225,29 @@ func (c *Collector) unavailableCPU(timestamp time.Time, err error) model.CPUInfo
 	}
 }
 
-func (c *Collector) readFrequencies(timestamp time.Time) (map[int]model.Metric, map[int]string) {
-	result := make(map[int]model.Metric)
-	maximums := make(map[int]float64)
-	paths, _ := c.fs.Glob("/sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_cur_freq")
-	fallback, _ := c.fs.Glob("/sys/devices/system/cpu/cpu[0-9]*/cpufreq/cpuinfo_cur_freq")
+func discoverFrequencyTopology(systemFS sysfs.SystemFS) (map[int]string, map[int]string) {
+	frequencyPaths := make(map[int]string)
+	fallback, _ := systemFS.Glob("/sys/devices/system/cpu/cpu[0-9]*/cpufreq/cpuinfo_cur_freq")
 	for _, path := range fallback {
-		id, ok := coreIDFromPath(path)
-		if ok {
-			if _, exists := result[id]; !exists {
-				result[id] = c.readFrequency(path, timestamp)
-			}
+		if id, ok := coreIDFromPath(path); ok {
+			frequencyPaths[id] = path
 		}
 	}
+	paths, _ := systemFS.Glob("/sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_cur_freq")
 	for _, path := range paths {
-		id, ok := coreIDFromPath(path)
-		if ok {
-			result[id] = c.readFrequency(path, timestamp)
+		if id, ok := coreIDFromPath(path); ok {
+			frequencyPaths[id] = path
 		}
 	}
-	maxPaths, _ := c.fs.Glob("/sys/devices/system/cpu/cpu[0-9]*/cpufreq/cpuinfo_max_freq")
+
+	maximums := make(map[int]float64)
+	maxPaths, _ := systemFS.Glob("/sys/devices/system/cpu/cpu[0-9]*/cpufreq/cpuinfo_max_freq")
 	for _, path := range maxPaths {
 		id, ok := coreIDFromPath(path)
 		if !ok {
 			continue
 		}
-		data, err := c.fs.ReadFile(path)
+		data, err := systemFS.ReadFile(path)
 		if err != nil {
 			continue
 		}
@@ -218,7 +256,15 @@ func (c *Collector) readFrequencies(timestamp time.Time) (map[int]model.Metric, 
 			maximums[id] = value
 		}
 	}
-	return result, classifyClusters(maximums)
+	return frequencyPaths, classifyClusters(maximums)
+}
+
+func (c *Collector) readFrequencies(timestamp time.Time) map[int]model.Metric {
+	result := make(map[int]model.Metric)
+	for id, path := range c.frequencyPaths {
+		result[id] = c.readFrequency(path, timestamp)
+	}
+	return result
 }
 
 func (c *Collector) readFrequency(path string, timestamp time.Time) model.Metric {

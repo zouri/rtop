@@ -89,47 +89,6 @@ func parseUintField(fields []string, index int, name string) (uint64, error) {
 	return value, nil
 }
 
-type Status struct {
-	RSSBytes uint64
-	Threads  int
-}
-
-func ParseStatus(data []byte) (Status, error) {
-	var result Status
-	for _, line := range strings.Split(string(data), "\n") {
-		key, value, ok := strings.Cut(line, ":")
-		if !ok {
-			continue
-		}
-		fields := strings.Fields(value)
-		if len(fields) == 0 {
-			continue
-		}
-		switch key {
-		case "VmRSS":
-			rss, err := strconv.ParseUint(fields[0], 10, 64)
-			if err != nil {
-				return Status{}, fmt.Errorf("VmRSS: %w", err)
-			}
-			multiplier := uint64(1)
-			if len(fields) > 1 && strings.EqualFold(fields[1], "kB") {
-				multiplier = 1024
-			}
-			if rss > ^uint64(0)/multiplier {
-				return Status{}, errors.New("VmRSS overflows bytes")
-			}
-			result.RSSBytes = rss * multiplier
-		case "Threads":
-			threads, err := strconv.Atoi(fields[0])
-			if err != nil || threads < 0 {
-				return Status{}, fmt.Errorf("invalid Threads %q", fields[0])
-			}
-			result.Threads = threads
-		}
-	}
-	return result, nil
-}
-
 type sample struct {
 	stat         Stat
 	rssBytes     uint64
@@ -162,6 +121,14 @@ func NewCollector(systemFS sysfs.SystemFS, sampleDuration time.Duration) *Collec
 		sampleDuration: sampleDuration,
 		pageSize:       uint64(os.Getpagesize()),
 	}
+}
+
+// Reset discards the delta baseline so the next collection measures current
+// process activity over the configured initial sampling window.
+func (c *Collector) Reset() {
+	c.mu.Lock()
+	c.previous = nil
+	c.mu.Unlock()
 }
 
 func (c *Collector) Collect(ctx context.Context) ([]model.ProcessInfo, []model.Warning) {
@@ -234,38 +201,18 @@ func (c *Collector) capture() (*capture, error) {
 		if parseErr != nil {
 			continue
 		}
-		statusPath := path + "/status"
-		status, statusErr := c.readStatus(statusPath)
-		rssBytes := status.RSSBytes
-		memorySource := statusPath
-		if statusErr != nil {
-			memorySource = statPath
-		}
-		if rssBytes == 0 && processStat.RSSPages > 0 {
+		var rssBytes uint64
+		if processStat.RSSPages > 0 {
 			pages := uint64(processStat.RSSPages)
 			if pages <= ^uint64(0)/c.pageSize {
 				rssBytes = pages * c.pageSize
-				memorySource = statPath
 			}
 		}
-		threads := status.Threads
-		if threads == 0 {
-			threads = processStat.Threads
-		}
-		processStat.Threads = threads
 		result.processes[processStat.PID] = sample{
-			stat: processStat, rssBytes: rssBytes, statPath: statPath, memorySource: memorySource,
+			stat: processStat, rssBytes: rssBytes, statPath: statPath, memorySource: statPath,
 		}
 	}
 	return result, nil
-}
-
-func (c *Collector) readStatus(path string) (Status, error) {
-	data, err := c.fs.ReadFile(path)
-	if err != nil {
-		return Status{}, err
-	}
-	return ParseStatus(data)
 }
 
 func (c *Collector) build(current, previous *capture) []model.ProcessInfo {

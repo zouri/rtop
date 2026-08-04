@@ -47,6 +47,86 @@ func TestHistoryIsBounded(t *testing.T) {
 	}
 }
 
+func TestProcessesAreSortedOnlyWhenDataOrSortModeChanges(t *testing.T) {
+	now := time.Now()
+	snapshot := testSnapshot()
+	snapshot.Processes = []model.ProcessInfo{
+		{PID: 3, CPU: model.AvailableMetric(10, "%", "/proc/3/stat", now), Memory: model.AvailableMetric(30, "MiB", "/proc/3/stat", now)},
+		{PID: 1, CPU: model.AvailableMetric(30, "%", "/proc/1/stat", now), Memory: model.AvailableMetric(10, "MiB", "/proc/1/stat", now)},
+		{PID: 2, CPU: model.AvailableMetric(20, "%", "/proc/2/stat", now), Memory: model.AvailableMetric(20, "MiB", "/proc/2/stat", now)},
+	}
+	uiModel := NewModel(make(chan model.Snapshot), nil)
+	updated, _ := uiModel.Update(snapshotMsg{snapshot: snapshot})
+	uiModel = updated.(Model)
+	if got := []int{uiModel.processes[0].PID, uiModel.processes[1].PID, uiModel.processes[2].PID}; got[0] != 1 || got[1] != 2 || got[2] != 3 {
+		t.Fatalf("CPU order = %v", got)
+	}
+	if snapshot.Processes[0].PID != 3 {
+		t.Fatal("sorting mutated the snapshot process order")
+	}
+
+	uiModel.page = pageProcesses
+	updated, _ = uiModel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	uiModel = updated.(Model)
+	if got := []int{uiModel.processes[0].PID, uiModel.processes[1].PID, uiModel.processes[2].PID}; got[0] != 3 || got[1] != 2 || got[2] != 1 {
+		t.Fatalf("memory order = %v", got)
+	}
+}
+
+func TestSameProcessSliceDetection(t *testing.T) {
+	processes := make([]model.ProcessInfo, 2)
+	if !sameProcessSlice(processes, processes) {
+		t.Fatal("same slice was reported as changed")
+	}
+	if sameProcessSlice(processes, append([]model.ProcessInfo(nil), processes...)) {
+		t.Fatal("copied slice was reported as unchanged")
+	}
+	if sameProcessSlice(processes, processes[:1]) {
+		t.Fatal("different length was reported as unchanged")
+	}
+}
+
+func TestPageCollectionScopesAndNotifications(t *testing.T) {
+	tests := []struct {
+		page page
+		want model.CollectionScope
+	}{
+		{pageOverview, model.CollectOverview},
+		{pageEngines, model.CollectAccelerators},
+		{pageProcesses, model.CollectProcesses},
+		{pageThermal, model.CollectThermals},
+		{pageSystem, model.CollectAll},
+		{pageHelp, 0},
+	}
+	for _, test := range tests {
+		if got := scopeForPage(test.page); got != test.want {
+			t.Fatalf("page %d scope = %b, want %b", test.page, got, test.want)
+		}
+	}
+
+	var notified model.CollectionScope
+	uiModel := NewModelWithScope(make(chan model.Snapshot), nil, func(scope model.CollectionScope) {
+		notified = scope
+	})
+	updated, command := uiModel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}})
+	uiModel = updated.(Model)
+	if command == nil {
+		t.Fatal("page switch did not return a scope command")
+	}
+	command()
+	if uiModel.page != pageProcesses || notified != model.CollectProcesses {
+		t.Fatalf("page=%d notified scope=%b", uiModel.page, notified)
+	}
+}
+
+func TestHistoryIgnoresSnapshotsWithoutTrackedMetrics(t *testing.T) {
+	uiModel := NewModel(make(chan model.Snapshot), nil)
+	uiModel.addHistory(model.Snapshot{})
+	if len(uiModel.history) != 0 {
+		t.Fatalf("history length = %d, want 0", len(uiModel.history))
+	}
+}
+
 func TestViewNeverExceedsTerminalWidth(t *testing.T) {
 	for _, width := range []int{32, 80, 120} {
 		uiModel := NewModel(make(chan model.Snapshot), nil)

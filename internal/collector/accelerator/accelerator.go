@@ -62,21 +62,43 @@ func (c *Collector) Collect() ([]model.Accelerator, []model.Warning) {
 	ddr, hasDDR := c.devices[ddrType]
 
 	gpuInfo, gpuWarnings := c.collectDevice(gpu, hasGPU, gpuType, "Mali GPU", timestamp)
-	npuInfo, npuWarnings := c.collectDevice(npu, hasNPU, npuType, "RKNPU", timestamp)
+	npuInfo, npuWarnings := c.collectNPU(npu, hasNPU, timestamp)
 	ddrInfo, ddrWarnings := c.collectDevice(ddr, hasDDR, ddrType, "DDR/DMC", timestamp)
-	if hasNPU {
-		cores, warning := c.readNPUCores(c.expectedNPUCores, timestamp)
-		npuInfo.Cores = cores
-		if warning != nil {
-			npuWarnings = append(npuWarnings, *warning)
-		}
-	}
 
 	warnings := append([]model.Warning{}, c.probeWarnings...)
 	warnings = append(warnings, gpuWarnings...)
 	warnings = append(warnings, npuWarnings...)
 	warnings = append(warnings, ddrWarnings...)
 	return []model.Accelerator{gpuInfo, npuInfo, ddrInfo}, warnings
+}
+
+func (c *Collector) collectNPU(device device, found bool, timestamp time.Time) (model.Accelerator, []model.Warning) {
+	if !found {
+		return missingAccelerator(npuType, "RKNPU", timestamp), nil
+	}
+
+	runtimeSource := filepath.Join(device.path, "device", "power", "runtime_status")
+	if status, err := readText(c.fs, runtimeSource); err == nil && strings.EqualFold(status, "suspended") {
+		return model.Accelerator{
+			Name:      "RKNPU",
+			Type:      npuType,
+			Usage:     model.AvailableMetric(0, "%", runtimeSource, timestamp),
+			Frequency: model.MissingMetric(model.Stale, "MHz", runtimeSource, "device is runtime suspended; devfreq frequency is cached", timestamp),
+			Cores:     idleCores(max(1, c.expectedNPUCores), runtimeSource, timestamp),
+		}, nil
+	}
+
+	info, warnings := c.collectDevice(device, true, npuType, "RKNPU", timestamp)
+	cores, coreWarning := c.readNPUCores(c.expectedNPUCores, timestamp)
+	info.Cores = cores
+	if aggregate, ok := aggregateCoreUsage(cores, timestamp); ok {
+		info.Usage = aggregate
+		warnings = metricWarnings(npuType, info.Usage, info.Frequency)
+	}
+	if coreWarning != nil {
+		warnings = append(warnings, *coreWarning)
+	}
+	return info, warnings
 }
 
 func (c *Collector) Drivers() []model.DriverInfo {
@@ -207,6 +229,14 @@ func readFrequency(systemFS sysfs.SystemFS, device device, timestamp time.Time) 
 		return model.AvailableMetric(value/1_000_000, "MHz", path, timestamp)
 	}
 	return missingForError(bestErr, "MHz", candidates[0], timestamp)
+}
+
+func readText(systemFS sysfs.SystemFS, path string) (string, error) {
+	data, err := systemFS.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(data)), nil
 }
 
 func parseLoad(data []byte) (float64, error) {
@@ -354,6 +384,34 @@ func availableCores(loads map[int]float64, expected int, source string, timestam
 		cores = append(cores, model.AcceleratorCore{ID: id, Usage: metric})
 	}
 	return cores
+}
+
+func idleCores(count int, source string, timestamp time.Time) []model.AcceleratorCore {
+	cores := make([]model.AcceleratorCore, count)
+	for id := range cores {
+		cores[id] = model.AcceleratorCore{
+			ID: id, Usage: model.AvailableMetric(0, "%", source, timestamp),
+		}
+	}
+	return cores
+}
+
+func aggregateCoreUsage(cores []model.AcceleratorCore, timestamp time.Time) (model.Metric, bool) {
+	if len(cores) == 0 {
+		return model.Metric{}, false
+	}
+	var total float64
+	source := ""
+	for _, core := range cores {
+		if core.Usage.Status != model.Available || core.Usage.Value == nil {
+			return model.Metric{}, false
+		}
+		total += *core.Usage.Value
+		if source == "" {
+			source = core.Usage.Source
+		}
+	}
+	return model.AvailableMetric(total/float64(len(cores)), "%", source, timestamp), true
 }
 
 func missingCores(count int, status model.MetricStatus, source, message string, timestamp time.Time) []model.AcceleratorCore {
