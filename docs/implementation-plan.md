@@ -229,21 +229,23 @@ doctor 只给出诊断信息和修复建议，不自动 mount、chmod 或修改�
 
 ## 9. TUI 设计
 
-第一版包含以下页面：
+界面定位参考 Jetson 平台的 jtop，采用 ALL 总览加硬件域详情：
 
-- Overview：CPU、内存、GPU、NPU、温度和告警摘要。
-- Engines：GPU、NPU、DDR 的负载、频率和历史曲线。
-- Processes：进程 CPU、内存和线程数排名。
-- Thermal：温度区域、风扇、功耗和降频状态。
-- System：SoC、板卡、内核、驱动和能力信息。
-- Help：快捷键说明。
+- ALL：CPU、内存、GPU、NPU、DDR、最高温度、告警和 Top 进程。
+- CPU：总体与单核负载、频率、系统负载和相关温度。
+- MEMORY：内存、Swap、负载历史和高内存进程。
+- ENGINES：GPU、NPU、DDR 的负载、频率、历史曲线及温度。
+- PROCESSES：进程 CPU、内存和线程数排名，并可查看选中进程详情。
+- INFO：SoC、板卡、内核、驱动、指标来源和诊断信息。
+- HELP：使用覆盖层展示，不离开当前页面，也不改变采集范围。
 
 建议快捷键：
 
-- 1～5：切换页面。
+- 1～6：切换 ALL、CPU、MEMORY、ENGINES、PROCESSES 和 INFO。
 - 上下方向键：选择进程或列表项。
 - c：按 CPU 排序。
 - m：按内存排序。
+- Enter：查看选中进程详情。
 - r：立即采样一次。
 - ?：帮助。
 - q 或 Ctrl+C：退出。

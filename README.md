@@ -27,12 +27,18 @@ rtop doctor
 rtop doctor --json
 ```
 
-TUI keys:
+The TUI follows a jtop-style board monitor layout:
 
-- `1`–`5`: switch between Overview, Engines, Processes, Thermal and System.
-- `?` or `6`: show Help.
-- `↑`/`↓` or `j`/`k`: select a process.
+- `1`: ALL board overview.
+- `2`: CPU detail.
+- `3`: memory, load and memory-heavy processes.
+- `4`: Rockchip GPU, NPU, DDR and thermal detail.
+- `5`: process table.
+- `6` or `i`: board, driver and metric-source information.
+- `?`: show Help without leaving the active page.
+- `↑`/`↓` or `j`/`k`: select a process or scroll a detail page.
 - `c`/`m`: sort processes by CPU or memory.
+- `Enter`: toggle details for the selected process.
 - `r`: request an immediate refresh.
 - `q` or `Ctrl+C`: exit.
 
@@ -43,11 +49,13 @@ against a fixture tree instead of the live system.
 CPU, memory and accelerator metrics follow `--interval`. Process and thermal
 collection use lower default cadences of 2s and 5s respectively to reduce
 observer overhead; adjust them with `--process-interval` and
-`--thermal-interval`. Pressing `r` forces every collector to refresh.
-The TUI also collects by page: Overview skips process scanning, Engines reads
-only accelerator metrics, Processes reads only process metrics, Thermal reads
-only sensors, and Help performs no dynamic collection. System collects all
-groups because it displays their capability status.
+`--thermal-interval`. Pressing `r` forces the active page's collectors to refresh.
+The TUI also collects by page. ALL collects the board-wide view, CPU combines
+CPU/load/thermal metrics, Memory adds process ranking, Engines combines
+accelerator and thermal metrics, Processes scans only processes, and Info reads
+the lightweight capability groups. Help is an overlay and does not change the
+active collection scope. The UI retains the last value for groups that are not
+collected on the active page instead of presenting them as missing.
 For headless output, `snapshot --top N` emits only the busiest N processes and
 `snapshot --no-processes` skips process collection entirely.
 

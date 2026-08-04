@@ -82,7 +82,9 @@ func runTUI(ctx context.Context, config runtimeConfig, stdout io.Writer) error {
 	monitor := NewMonitorWithIntervals(
 		systemFS, config.cpuSampleDuration, config.processInterval, config.thermalInterval,
 	)
-	monitor.SetCollectionScope(model.CollectOverview)
+	// The default ALL page mirrors jtop's board-wide view and includes a small
+	// top-process list. Slower collectors still keep their independent cadence.
+	monitor.SetCollectionScope(model.CollectAll)
 	scheduler := NewScheduler(monitor.Snapshot, config.interval, periodicSnapshotTimeout(config))
 	tuiContext, cancel := context.WithCancel(ctx)
 	defer cancel()

@@ -149,6 +149,7 @@ func (m *Monitor) Snapshot(ctx context.Context) model.Snapshot {
 	warnings = append(warnings, acceleratorWarnings...)
 
 	return model.Snapshot{
+		Collected:    scope,
 		Timestamp:    timestamp,
 		System:       m.systemInfo,
 		CPU:          cpuInfo,

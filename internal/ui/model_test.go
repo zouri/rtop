@@ -6,6 +6,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
 	"rtop/internal/model"
@@ -22,7 +23,7 @@ func TestModelHandlesSnapshotsNavigationAndNarrowResize(t *testing.T) {
 		t.Fatal("empty view")
 	}
 
-	updated, _ = uiModel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}})
+	updated, _ = uiModel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'5'}})
 	uiModel = updated.(Model)
 	if uiModel.page != pageProcesses {
 		t.Fatalf("page = %d", uiModel.page)
@@ -42,8 +43,8 @@ func TestHistoryIsBounded(t *testing.T) {
 	for range 150 {
 		uiModel.addHistory(testSnapshot())
 	}
-	if len(uiModel.history) != 120 {
-		t.Fatalf("history length = %d", len(uiModel.history))
+	if len(uiModel.cpuHistory) != 120 || len(uiModel.memoryHistory) != 120 || len(uiModel.gpuHistory) != 120 {
+		t.Fatalf("history lengths cpu=%d memory=%d gpu=%d", len(uiModel.cpuHistory), len(uiModel.memoryHistory), len(uiModel.gpuHistory))
 	}
 }
 
@@ -91,12 +92,12 @@ func TestPageCollectionScopesAndNotifications(t *testing.T) {
 		page page
 		want model.CollectionScope
 	}{
-		{pageOverview, model.CollectOverview},
-		{pageEngines, model.CollectAccelerators},
+		{pageAll, model.CollectAll},
+		{pageCPU, model.CollectCPU | model.CollectMemory | model.CollectThermals},
+		{pageMemory, model.CollectMemory | model.CollectProcesses},
+		{pageEngines, model.CollectAccelerators | model.CollectThermals},
 		{pageProcesses, model.CollectProcesses},
-		{pageThermal, model.CollectThermals},
-		{pageSystem, model.CollectAll},
-		{pageHelp, 0},
+		{pageInfo, model.CollectOverview},
 	}
 	for _, test := range tests {
 		if got := scopeForPage(test.page); got != test.want {
@@ -108,7 +109,7 @@ func TestPageCollectionScopesAndNotifications(t *testing.T) {
 	uiModel := NewModelWithScope(make(chan model.Snapshot), nil, func(scope model.CollectionScope) {
 		notified = scope
 	})
-	updated, command := uiModel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}})
+	updated, command := uiModel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'5'}})
 	uiModel = updated.(Model)
 	if command == nil {
 		t.Fatal("page switch did not return a scope command")
@@ -122,8 +123,45 @@ func TestPageCollectionScopesAndNotifications(t *testing.T) {
 func TestHistoryIgnoresSnapshotsWithoutTrackedMetrics(t *testing.T) {
 	uiModel := NewModel(make(chan model.Snapshot), nil)
 	uiModel.addHistory(model.Snapshot{})
-	if len(uiModel.history) != 0 {
-		t.Fatalf("history length = %d, want 0", len(uiModel.history))
+	if len(uiModel.cpuHistory) != 0 || len(uiModel.memoryHistory) != 0 || len(uiModel.gpuHistory) != 0 {
+		t.Fatalf("unexpected history for empty snapshot")
+	}
+}
+
+func TestSparseSnapshotsRetainLastValuesFromOtherPages(t *testing.T) {
+	uiModel := NewModel(make(chan model.Snapshot), nil)
+	updated, _ := uiModel.Update(snapshotMsg{snapshot: testSnapshot()})
+	uiModel = updated.(Model)
+
+	now := time.Now()
+	processOnly := model.Snapshot{
+		Collected: model.CollectProcesses,
+		Timestamp: now,
+		System:    uiModel.latest.System,
+		Processes: []model.ProcessInfo{{
+			PID: 200, Name: "new worker",
+			CPU: model.AvailableMetric(20, "%", "/proc/200/stat", now),
+		}},
+	}
+	updated, _ = uiModel.Update(snapshotMsg{snapshot: processOnly})
+	uiModel = updated.(Model)
+	if got := metricNumber(uiModel.latest.CPU.Overall); got != 25 {
+		t.Fatalf("CPU value after process-only snapshot = %v", got)
+	}
+	if len(uiModel.latest.Accelerators) != 2 {
+		t.Fatalf("accelerators after process-only snapshot = %d", len(uiModel.latest.Accelerators))
+	}
+}
+
+func TestHelpIsOverlayAndDoesNotChangeCollectionScope(t *testing.T) {
+	called := false
+	uiModel := NewModelWithScope(make(chan model.Snapshot), nil, func(model.CollectionScope) {
+		called = true
+	})
+	updated, command := uiModel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	uiModel = updated.(Model)
+	if !uiModel.showHelp || command != nil || called {
+		t.Fatalf("help overlay show=%v command=%v called=%v", uiModel.showHelp, command != nil, called)
 	}
 }
 
@@ -134,13 +172,23 @@ func TestViewNeverExceedsTerminalWidth(t *testing.T) {
 		uiModel = updated.(Model)
 		updated, _ = uiModel.Update(snapshotMsg{snapshot: testSnapshot()})
 		uiModel = updated.(Model)
-		for _, currentPage := range []page{pageOverview, pageEngines, pageProcesses, pageThermal, pageSystem, pageHelp} {
+		for _, currentPage := range []page{pageAll, pageCPU, pageMemory, pageEngines, pageProcesses, pageInfo} {
 			uiModel.page = currentPage
 			view := uiModel.View()
 			for lineNumber, line := range strings.Split(view, "\n") {
 				if got := ansi.StringWidth(line); got > width {
 					t.Fatalf("width %d page %d line %d rendered %d cells: %q", width, currentPage, lineNumber+1, got, line)
 				}
+			}
+			if got := lipgloss.Height(view); got > uiModel.height {
+				t.Fatalf("width %d page %d rendered %d lines for height %d", width, currentPage, got, uiModel.height)
+			}
+		}
+		uiModel.showHelp = true
+		helpView := uiModel.View()
+		for lineNumber, line := range strings.Split(helpView, "\n") {
+			if got := ansi.StringWidth(line); got > width {
+				t.Fatalf("width %d help line %d rendered %d cells: %q", width, lineNumber+1, got, line)
 			}
 		}
 	}
@@ -153,16 +201,59 @@ func TestStandardTerminalOverviewIncludesEngines(t *testing.T) {
 	updated, _ = uiModel.Update(snapshotMsg{snapshot: testSnapshot()})
 	uiModel = updated.(Model)
 	view := ansi.Strip(uiModel.View())
-	for _, expected := range []string{"CPU", "Memory & Load", "Mali GPU", "RKNPU"} {
+	for _, expected := range []string{"CPU", "c0", "MEMORY", "TOP PROCESSES", "Mali GPU", "RKNPU"} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("overview is missing %q:\n%s", expected, view)
 		}
 	}
 }
 
+func TestCPUPageRendersPerCoreUsageGraph(t *testing.T) {
+	uiModel := NewModel(make(chan model.Snapshot), nil)
+	updated, _ := uiModel.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	uiModel = updated.(Model)
+	updated, _ = uiModel.Update(snapshotMsg{snapshot: testSnapshot()})
+	uiModel = updated.(Model)
+	uiModel.page = pageCPU
+	view := ansi.Strip(uiModel.View())
+	coreGraph := false
+	for _, line := range strings.Split(view, "\n") {
+		if strings.Contains(line, "cpu0") && strings.Contains(line, "[") && strings.Contains(line, "]") {
+			coreGraph = true
+			break
+		}
+	}
+	if !coreGraph {
+		t.Fatalf("CPU page is missing a per-core usage graph:\n%s", view)
+	}
+}
+
+func TestAllPageKeepsPerCoreUsageCompact(t *testing.T) {
+	uiModel := NewModel(make(chan model.Snapshot), nil)
+	updated, _ := uiModel.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	uiModel = updated.(Model)
+	updated, _ = uiModel.Update(snapshotMsg{snapshot: testSnapshot()})
+	uiModel = updated.(Model)
+	view := ansi.Strip(uiModel.View())
+	for _, line := range strings.Split(view, "\n") {
+		if start := strings.Index(line, "c0"); start >= 0 {
+			coreSection := line[start:]
+			if end := strings.Index(coreSection, "│"); end >= 0 {
+				coreSection = coreSection[:end]
+			}
+			if strings.Contains(coreSection, "[") || strings.Contains(coreSection, "]") {
+				t.Fatalf("ALL page core row contains a load bar: %q", line)
+			}
+			return
+		}
+	}
+	t.Fatal("ALL page is missing the compact core row")
+}
+
 func testSnapshot() model.Snapshot {
 	now := time.Now()
 	return model.Snapshot{
+		Collected: model.CollectAll,
 		Timestamp: now,
 		System: model.SystemInfo{
 			Hostname: "fixture", OS: "Linux", Kernel: "6.1", Arch: "arm64", SoC: "RK3588",

@@ -141,13 +141,17 @@ type Warning struct {
 }
 
 type Snapshot struct {
-	Timestamp    time.Time     `json:"timestamp"`
-	System       SystemInfo    `json:"system"`
-	CPU          CPUInfo       `json:"cpu"`
-	Memory       MemoryInfo    `json:"memory"`
-	Load         LoadInfo      `json:"load"`
-	Thermals     []ThermalZone `json:"thermals"`
-	Accelerators []Accelerator `json:"accelerators"`
-	Processes    []ProcessInfo `json:"processes"`
-	Warnings     []Warning     `json:"warnings"`
+	// Collected records which dynamic groups are present in this snapshot. It is
+	// runtime metadata for interactive consumers and is intentionally omitted
+	// from the stable JSON snapshot format.
+	Collected    CollectionScope `json:"-"`
+	Timestamp    time.Time       `json:"timestamp"`
+	System       SystemInfo      `json:"system"`
+	CPU          CPUInfo         `json:"cpu"`
+	Memory       MemoryInfo      `json:"memory"`
+	Load         LoadInfo        `json:"load"`
+	Thermals     []ThermalZone   `json:"thermals"`
+	Accelerators []Accelerator   `json:"accelerators"`
+	Processes    []ProcessInfo   `json:"processes"`
+	Warnings     []Warning       `json:"warnings"`
 }

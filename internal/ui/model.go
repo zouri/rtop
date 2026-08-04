@@ -15,12 +15,12 @@ import (
 type page int
 
 const (
-	pageOverview page = iota
+	pageAll page = iota
+	pageCPU
+	pageMemory
 	pageEngines
 	pageProcesses
-	pageThermal
-	pageSystem
-	pageHelp
+	pageInfo
 )
 
 type processSort int
@@ -30,14 +30,6 @@ const (
 	sortMemory
 )
 
-type historyPoint struct {
-	cpu    float64
-	memory float64
-	gpu    float64
-	npu    float64
-	ddr    float64
-}
-
 type Model struct {
 	snapshots    <-chan model.Snapshot
 	refresh      func()
@@ -46,14 +38,21 @@ type Model struct {
 	hasData      bool
 	closed       bool
 
-	width        int
-	height       int
-	page         page
-	previousPage page
-	processSort  processSort
-	selected     int
-	processes    []model.ProcessInfo
-	history      []historyPoint
+	width             int
+	height            int
+	page              page
+	showHelp          bool
+	showProcessDetail bool
+	processSort       processSort
+	selected          int
+	scrollOffset      int
+	processes         []model.ProcessInfo
+
+	cpuHistory    []float64
+	memoryHistory []float64
+	gpuHistory    []float64
+	npuHistory    []float64
+	ddrHistory    []float64
 
 	keys keyMap
 	help help.Model
@@ -77,11 +76,8 @@ func NewModelWithScope(
 	helper := help.New()
 	helper.ShowAll = false
 	return Model{
-		snapshots:    snapshots,
-		refresh:      refresh,
-		scopeChanged: scopeChanged,
-		keys:         newKeyMap(),
-		help:         helper,
+		snapshots: snapshots, refresh: refresh, scopeChanged: scopeChanged,
+		keys: newKeyMap(), help: helper,
 	}
 }
 
@@ -104,16 +100,20 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = message.Width, message.Height
 		m.help.Width = max(1, message.Width-4)
+		m.clampScroll()
 		return m, nil
 	case snapshotMsg:
-		processesChanged := !sameProcessSlice(m.latest.Processes, message.snapshot.Processes)
-		m.latest = message.snapshot
+		scope := collectedScope(message.snapshot)
+		processesChanged := scope.Includes(model.CollectProcesses) &&
+			!sameProcessSlice(m.latest.Processes, message.snapshot.Processes)
+		m.mergeSnapshot(message.snapshot, scope)
 		m.hasData = true
 		if processesChanged {
 			m.sortProcesses()
 		}
 		m.addHistory(message.snapshot)
 		m.clampSelection()
+		m.clampScroll()
 		return m, waitForSnapshot(m.snapshots)
 	case snapshotsClosedMsg:
 		m.closed = true
@@ -122,36 +122,39 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if key.Matches(message, m.keys.Quit) {
 			return m, tea.Quit
 		}
-		if key.Matches(message, m.keys.Overview) {
-			m.setPage(pageOverview)
+		if key.Matches(message, m.keys.Help) {
+			m.showHelp = !m.showHelp
+			m.scrollOffset = 0
+			return m, nil
+		}
+		if key.Matches(message, m.keys.Back) && m.showHelp {
+			m.showHelp = false
+			m.scrollOffset = 0
+			return m, nil
+		}
+
+		if key.Matches(message, m.keys.All) {
+			m.setPage(pageAll)
 			return m, m.scopeCommand()
 		}
-		if key.Matches(message, m.keys.Processes) {
-			m.setPage(pageProcesses)
+		if key.Matches(message, m.keys.CPU) {
+			m.setPage(pageCPU)
+			return m, m.scopeCommand()
+		}
+		if key.Matches(message, m.keys.Memory) {
+			m.setPage(pageMemory)
 			return m, m.scopeCommand()
 		}
 		if key.Matches(message, m.keys.Engines) {
 			m.setPage(pageEngines)
 			return m, m.scopeCommand()
 		}
-		if key.Matches(message, m.keys.Thermal) {
-			m.setPage(pageThermal)
+		if key.Matches(message, m.keys.Processes) {
+			m.setPage(pageProcesses)
 			return m, m.scopeCommand()
 		}
-		if key.Matches(message, m.keys.System) {
-			m.setPage(pageSystem)
-			return m, m.scopeCommand()
-		}
-		if key.Matches(message, m.keys.Help) {
-			if m.page == pageHelp {
-				m.page = m.previousPage
-			} else {
-				m.previousPage, m.page = m.page, pageHelp
-			}
-			return m, m.scopeCommand()
-		}
-		if key.Matches(message, m.keys.Back) && m.page == pageHelp {
-			m.page = m.previousPage
+		if key.Matches(message, m.keys.Info) {
+			m.setPage(pageInfo)
 			return m, m.scopeCommand()
 		}
 		if key.Matches(message, m.keys.Refresh) {
@@ -163,6 +166,18 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				return nil
 			}
 		}
+
+		if m.showHelp {
+			switch {
+			case key.Matches(message, m.keys.Up):
+				m.scrollOffset--
+			case key.Matches(message, m.keys.Down):
+				m.scrollOffset++
+			}
+			m.clampScroll()
+			return m, nil
+		}
+
 		if m.page == pageProcesses {
 			switch {
 			case key.Matches(message, m.keys.Up):
@@ -181,8 +196,19 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					m.processSort = sortMemory
 					m.sortProcesses()
 				}
+			case key.Matches(message, m.keys.Details):
+				m.showProcessDetail = !m.showProcessDetail
 			}
+			return m, nil
 		}
+
+		switch {
+		case key.Matches(message, m.keys.Up):
+			m.scrollOffset--
+		case key.Matches(message, m.keys.Down):
+			m.scrollOffset++
+		}
+		m.clampScroll()
 	}
 	return m, nil
 }
@@ -195,10 +221,9 @@ func sameProcessSlice(left, right []model.ProcessInfo) bool {
 }
 
 func (m *Model) setPage(next page) {
-	if m.page != pageHelp {
-		m.previousPage = m.page
-	}
 	m.page = next
+	m.showHelp = false
+	m.scrollOffset = 0
 }
 
 func (m Model) scopeCommand() tea.Cmd {
@@ -215,18 +240,64 @@ func (m Model) scopeCommand() tea.Cmd {
 
 func scopeForPage(current page) model.CollectionScope {
 	switch current {
+	case pageCPU:
+		return model.CollectCPU | model.CollectMemory | model.CollectThermals
+	case pageMemory:
+		return model.CollectMemory | model.CollectProcesses
 	case pageEngines:
-		return model.CollectAccelerators
+		return model.CollectAccelerators | model.CollectThermals
 	case pageProcesses:
 		return model.CollectProcesses
-	case pageThermal:
-		return model.CollectThermals
-	case pageSystem:
-		return model.CollectAll
-	case pageHelp:
-		return 0
-	default:
+	case pageInfo:
 		return model.CollectOverview
+	default:
+		return model.CollectAll
+	}
+}
+
+func collectedScope(snapshot model.Snapshot) model.CollectionScope {
+	if snapshot.Collected != 0 {
+		return snapshot.Collected
+	}
+	var scope model.CollectionScope
+	if snapshot.CPU.Overall.Status != "" || snapshot.CPU.Cores != nil {
+		scope |= model.CollectCPU
+	}
+	if snapshot.Memory.Total.Status != "" || snapshot.Load.OneMinute.Status != "" {
+		scope |= model.CollectMemory
+	}
+	if len(snapshot.Accelerators) > 0 {
+		scope |= model.CollectAccelerators
+	}
+	if len(snapshot.Processes) > 0 {
+		scope |= model.CollectProcesses
+	}
+	if len(snapshot.Thermals) > 0 {
+		scope |= model.CollectThermals
+	}
+	return scope
+}
+
+func (m *Model) mergeSnapshot(snapshot model.Snapshot, scope model.CollectionScope) {
+	m.latest.Collected = scope
+	m.latest.Timestamp = snapshot.Timestamp
+	m.latest.System = snapshot.System
+	m.latest.Warnings = snapshot.Warnings
+	if scope.Includes(model.CollectCPU) {
+		m.latest.CPU = snapshot.CPU
+	}
+	if scope.Includes(model.CollectMemory) {
+		m.latest.Memory = snapshot.Memory
+		m.latest.Load = snapshot.Load
+	}
+	if scope.Includes(model.CollectAccelerators) {
+		m.latest.Accelerators = snapshot.Accelerators
+	}
+	if scope.Includes(model.CollectProcesses) {
+		m.latest.Processes = snapshot.Processes
+	}
+	if scope.Includes(model.CollectThermals) {
+		m.latest.Thermals = snapshot.Thermals
 	}
 }
 
@@ -245,6 +316,10 @@ func (m *Model) clampSelection() {
 }
 
 func (m *Model) sortProcesses() {
+	selectedPID := -1
+	if m.selected >= 0 && m.selected < len(m.processes) {
+		selectedPID = m.processes[m.selected].PID
+	}
 	previous := m.processes
 	m.processes = append(previous[:0], m.latest.Processes...)
 	if len(previous) > len(m.processes) {
@@ -262,39 +337,45 @@ func (m *Model) sortProcesses() {
 		}
 		return left > right
 	})
+	if selectedPID >= 0 {
+		for index, process := range m.processes {
+			if process.PID == selectedPID {
+				m.selected = index
+				break
+			}
+		}
+	}
 }
 
 func (m *Model) addHistory(snapshot model.Snapshot) {
-	point := historyPoint{
-		cpu: metricNumber(snapshot.CPU.Overall),
-		gpu: -1,
-		npu: -1,
-		ddr: -1,
+	scope := collectedScope(snapshot)
+	if scope.Includes(model.CollectCPU) {
+		m.cpuHistory = appendHistory(m.cpuHistory, metricNumber(snapshot.CPU.Overall))
 	}
-	if total, used := metricNumber(snapshot.Memory.Total), metricNumber(snapshot.Memory.Used); total > 0 && used >= 0 {
-		point.memory = used * 100 / total
-	} else {
-		point.memory = -1
+	if scope.Includes(model.CollectMemory) {
+		m.memoryHistory = appendHistory(m.memoryHistory, memoryPercent(snapshot.Memory))
 	}
-	for _, accelerator := range snapshot.Accelerators {
-		switch accelerator.Type {
-		case "gpu":
-			point.gpu = metricNumber(accelerator.Usage)
-		case "npu":
-			point.npu = metricNumber(accelerator.Usage)
-		case "ddr":
-			point.ddr = metricNumber(accelerator.Usage)
+	if scope.Includes(model.CollectAccelerators) {
+		values := map[string]float64{"gpu": -1, "npu": -1, "ddr": -1}
+		for _, accelerator := range snapshot.Accelerators {
+			values[accelerator.Type] = metricNumber(accelerator.Usage)
 		}
+		m.gpuHistory = appendHistory(m.gpuHistory, values["gpu"])
+		m.npuHistory = appendHistory(m.npuHistory, values["npu"])
+		m.ddrHistory = appendHistory(m.ddrHistory, values["ddr"])
 	}
-	if point.cpu < 0 && point.memory < 0 && point.gpu < 0 && point.npu < 0 && point.ddr < 0 {
-		return
+}
+
+func appendHistory(history []float64, value float64) []float64 {
+	if value < 0 && len(history) == 0 {
+		return history
 	}
-	if len(m.history) < 120 {
-		m.history = append(m.history, point)
-		return
+	if len(history) < 120 {
+		return append(history, value)
 	}
-	copy(m.history, m.history[1:])
-	m.history[len(m.history)-1] = point
+	copy(history, history[1:])
+	history[len(history)-1] = value
+	return history
 }
 
 func Run(
@@ -313,6 +394,7 @@ func RunWithScope(
 	scopeChanged func(model.CollectionScope),
 	output io.Writer,
 ) error {
+	output = synchronizedOutputForTerminal(output)
 	program := tea.NewProgram(
 		NewModelWithScope(snapshots, refresh, scopeChanged),
 		tea.WithContext(ctx),
