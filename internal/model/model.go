@@ -236,6 +236,7 @@ type AcceleratorCore struct {
 type ProcessInfo struct {
 	PID     int    `json:"pid"`
 	Name    string `json:"name"`
+	Path    string `json:"path,omitempty"`
 	CPU     Metric `json:"cpu"`
 	Memory  Metric `json:"memory"`
 	Threads int    `json:"threads"`

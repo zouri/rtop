@@ -90,10 +90,11 @@ func parseUintField(fields []string, index int, name string) (uint64, error) {
 }
 
 type sample struct {
-	stat         Stat
-	rssBytes     uint64
-	statPath     string
-	memorySource string
+	stat           Stat
+	executablePath string
+	rssBytes       uint64
+	statPath       string
+	memorySource   string
 }
 
 type capture struct {
@@ -208,8 +209,10 @@ func (c *Collector) capture() (*capture, error) {
 				rssBytes = pages * c.pageSize
 			}
 		}
+		executablePath, _ := c.fs.Readlink(path + "/exe")
 		result.processes[processStat.PID] = sample{
-			stat: processStat, rssBytes: rssBytes, statPath: statPath, memorySource: statPath,
+			stat: processStat, executablePath: executablePath,
+			rssBytes: rssBytes, statPath: statPath, memorySource: statPath,
 		}
 	}
 	return result, nil
@@ -231,7 +234,7 @@ func (c *Collector) build(current, previous *capture) []model.ProcessInfo {
 			float64(currentProcess.rssBytes)/(1024*1024), "MiB", currentProcess.memorySource, current.timestamp,
 		)
 		result = append(result, model.ProcessInfo{
-			PID: currentProcess.stat.PID, Name: currentProcess.stat.Name,
+			PID: currentProcess.stat.PID, Name: currentProcess.stat.Name, Path: currentProcess.executablePath,
 			CPU: cpuMetric, Memory: memoryMetric, Threads: currentProcess.stat.Threads,
 		})
 	}

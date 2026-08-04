@@ -30,9 +30,17 @@ var (
 	barTrack   = lipgloss.NewStyle().Background(colorPanel)
 )
 
+const (
+	minimumTerminalWidth  = 24
+	minimumTerminalHeight = 8
+)
+
 func (m Model) View() string {
 	if m.width <= 0 || m.height <= 0 {
 		return "rtop: starting…"
+	}
+	if m.width < minimumTerminalWidth || m.height < minimumTerminalHeight {
+		return m.renderSmallTerminal()
 	}
 	header := m.renderHeader()
 	footer := m.renderFooter()
@@ -45,6 +53,36 @@ func (m Model) View() string {
 		MaxHeight(bodyHeight).
 		Render(body)
 	return header + body + footer
+}
+
+func (m Model) renderSmallTerminal() string {
+	lines := []string{
+		titleStyle.Render("rtop") + "  " + mutedStyle.Render(pageTitle(m.page)),
+		fmt.Sprintf("Terminal %dx%d", m.width, m.height),
+		fmt.Sprintf("Minimum %dx%d", minimumTerminalWidth, minimumTerminalHeight),
+	}
+	lines = lines[:min(len(lines), m.height)]
+	for index := range lines {
+		lines[index] = ansi.Truncate(lines[index], max(1, m.width), "")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func pageTitle(current page) string {
+	switch current {
+	case pageCPU:
+		return "CPU"
+	case pageMemory:
+		return "MEMORY"
+	case pageEngines:
+		return "ENGINES"
+	case pageProcesses:
+		return "PROCESSES"
+	case pageInfo:
+		return "INFO"
+	default:
+		return "ALL"
+	}
 }
 
 func (m Model) renderHeader() string {
@@ -114,7 +152,9 @@ func (m Model) renderFooter() string {
 	case m.showHelp:
 		hint = "j/k scroll  esc close  q quit"
 	case m.page == pageProcesses:
-		hint = "j/k select  c CPU  m MEM  enter details  r refresh  ? help  q quit"
+		hint = "j/k select  c CPU  m MEM  p paths  enter details  r refresh  ? help  q quit"
+	case m.page == pageAll || m.page == pageMemory:
+		hint = "j/k scroll  p paths  r refresh  ? help  q quit"
 	default:
 		hint = "j/k scroll  r refresh  ? help  q quit"
 	}
@@ -156,7 +196,8 @@ func (m *Model) clampScroll() {
 	if m.scrollOffset < 0 {
 		m.scrollOffset = 0
 	}
-	if m.width <= 0 || m.height <= 0 || !m.hasData || (m.page == pageProcesses && !m.showHelp) {
+	if m.width < minimumTerminalWidth || m.height < minimumTerminalHeight ||
+		!m.hasData || (m.page == pageProcesses && !m.showHelp) {
 		m.scrollOffset = 0
 		return
 	}
@@ -185,16 +226,16 @@ func (m Model) renderAll(_ int) string {
 			lipgloss.Top,
 			m.cpuCardCompact(leftWidth), "  ", m.memoryCardCompact(rightWidth),
 		)
-		bottom := lipgloss.JoinHorizontal(
-			lipgloss.Top,
-			m.overviewEnginesCard(leftWidth), "  ", m.topProcessesCard(rightWidth, 4, sortCPU),
-		)
-		return top + "\n" + bottom
+		return top + "\n" +
+			m.overviewEnginesCard(m.width) + "\n" +
+			m.topProcessesCard(m.width, 5, sortCPU) + "\n" +
+			m.topProcessesCard(m.width, 5, sortMemory)
 	}
 	return m.cpuCardCompact(m.width) + "\n" +
 		m.memoryCardCompact(m.width) + "\n" +
 		m.overviewEnginesCard(m.width) + "\n" +
-		m.topProcessesCard(m.width, 4, sortCPU)
+		m.topProcessesCard(m.width, 5, sortCPU) + "\n" +
+		m.topProcessesCard(m.width, 5, sortMemory)
 }
 
 func (m Model) cpuCardCompact(width int) string {
@@ -202,7 +243,7 @@ func (m Model) cpuCardCompact(width int) string {
 	var builder strings.Builder
 	builder.WriteString(titleStyle.Render("CPU"))
 	builder.WriteString(fmt.Sprintf("  %-8s %s", formatMetricCompact(m.latest.CPU.Overall, 1), sparkline(m.cpuHistory, max(4, inner-17))))
-	const coresPerRow = 3
+	coresPerRow := max(1, min(4, inner/10))
 	for index, core := range m.latest.CPU.Cores {
 		if index%coresPerRow == 0 {
 			builder.WriteString("\n")
@@ -247,10 +288,22 @@ func (m Model) memoryCardCompact(width int) string {
 	percent := memoryPercent(m.latest.Memory)
 	var builder strings.Builder
 	builder.WriteString(titleStyle.Render("MEMORY"))
-	builder.WriteString(fmt.Sprintf("  %s / %s", formatMetric(m.latest.Memory.Used, 0), formatMetric(m.latest.Memory.Total, 0)))
+	usage := fmt.Sprintf("%s / %s", formatMetric(m.latest.Memory.Used, 0), formatMetric(m.latest.Memory.Total, 0))
+	if inner >= 28 {
+		builder.WriteString("  " + usage)
+	} else {
+		builder.WriteString("\n" + truncateText(usage, inner))
+	}
 	builder.WriteString("\n")
 	builder.WriteString(progressValue(percent, inner))
-	builder.WriteString(fmt.Sprintf("\nFree %s  Swap %s", formatMetric(m.latest.Memory.Available, 0), formatMetric(m.latest.Memory.SwapUsed, 0)))
+	free := "Free " + formatMetric(m.latest.Memory.Available, 0)
+	swap := "Swap " + formatMetric(m.latest.Memory.SwapUsed, 0)
+	if ansi.StringWidth(free)+ansi.StringWidth(swap)+2 <= inner {
+		builder.WriteString("\n" + free + "  " + swap)
+	} else {
+		builder.WriteString("\n" + truncateText(free, inner))
+		builder.WriteString("\n" + truncateText(swap, inner))
+	}
 	builder.WriteString(fmt.Sprintf("\nLoad %s %s %s", formatMetricCompact(m.latest.Load.OneMinute, 2), formatMetricCompact(m.latest.Load.FiveMinutes, 2), formatMetricCompact(m.latest.Load.FifteenMinutes, 2)))
 	if m.latest.Memory.Pressure.Memory.Some.Avg10.Status == model.Available {
 		builder.WriteString(fmt.Sprintf("\nPSI mem %s", formatMetricCompact(m.latest.Memory.Pressure.Memory.Some.Avg10, 2)))
@@ -259,22 +312,28 @@ func (m Model) memoryCardCompact(width int) string {
 }
 
 func (m Model) overviewEnginesCard(width int) string {
+	inner := max(8, width-4)
 	var builder strings.Builder
 	builder.WriteString(titleStyle.Render("ROCKCHIP ENGINES"))
 	for _, accelerator := range m.latest.Accelerators {
-		nameWidth := max(7, min(12, width-25))
-		builder.WriteString(fmt.Sprintf("\n%-*s %8s  %8s", nameWidth, truncateText(accelerator.Name, nameWidth), formatMetricCompact(accelerator.Usage, 0), formatMetricCompact(accelerator.Frequency, 0)))
+		if inner >= 28 {
+			nameWidth := max(7, min(12, inner-19))
+			builder.WriteString(fmt.Sprintf("\n%-*s %8s  %8s", nameWidth, truncateText(accelerator.Name, nameWidth), formatMetricCompact(accelerator.Usage, 0), formatMetricCompact(accelerator.Frequency, 0)))
+		} else {
+			line := fmt.Sprintf("%s  %s  %s", accelerator.Name, formatMetricCompact(accelerator.Usage, 0), formatMetricCompact(accelerator.Frequency, 0))
+			builder.WriteString("\n" + truncateText(line, inner))
+		}
 	}
 	if zone, ok := hottestThermal(m.latest.Thermals); ok {
-		builder.WriteString(fmt.Sprintf("\nHot %-16s %s", truncateText(zone.Name, 16), formatTemperature(zone.Temperature)))
+		builder.WriteString("\n" + truncateText(fmt.Sprintf("Hot %s  %s", zone.Name, formatTemperature(zone.Temperature)), inner))
 	} else {
-		builder.WriteString("\n" + mutedStyle.Render("No thermal source discovered"))
+		builder.WriteString("\n" + mutedStyle.Render(truncateText("No thermal source discovered", inner)))
 	}
 	if sensor, ok := primaryPowerSensor(m.latest.Power); ok {
-		builder.WriteString(fmt.Sprintf("\nPower %-14s %s", truncateText(sensor.Name, 14), formatMetricCompact(sensor.Value, 2)))
+		builder.WriteString("\n" + truncateText(fmt.Sprintf("Power %s  %s", sensor.Name, formatMetricCompact(sensor.Value, 2)), inner))
 	}
 	if len(m.latest.Fans) > 0 {
-		builder.WriteString(fmt.Sprintf("\nFan   %-14s %s", truncateText(m.latest.Fans[0].Name, 14), formatMetricCompact(m.latest.Fans[0].Speed, 0)))
+		builder.WriteString("\n" + truncateText(fmt.Sprintf("Fan %s  %s", m.latest.Fans[0].Name, formatMetricCompact(m.latest.Fans[0].Speed, 0)), inner))
 	}
 	if len(m.latest.Warnings) > 0 {
 		builder.WriteString("\n" + warnStyle.Render(fmt.Sprintf("%d warning(s) · open INFO", len(m.latest.Warnings))))
@@ -294,14 +353,22 @@ func (m Model) topProcessesCard(width, limit int, order processSort) string {
 		builder.WriteString("\n" + mutedStyle.Render("Waiting for readable processes"))
 		return panel(builder.String(), width)
 	}
-	nameWidth := max(7, width-23)
-	builder.WriteString(fmt.Sprintf("\n%-6s %-*s %8s", "PID", nameWidth, "NAME", metricHeading(order)))
+	nameWidth := max(4, width-23)
+	nameHeading := "NAME"
+	if m.showProcessPath {
+		nameHeading = "PATH"
+	}
+	builder.WriteString(fmt.Sprintf("\n%-6s %-*s %8s", "PID", nameWidth, nameHeading, metricHeading(order)))
 	for _, process := range processes[:min(limit, len(processes))] {
 		metric := process.CPU
 		if order == sortMemory {
 			metric = process.Memory
 		}
-		builder.WriteString(fmt.Sprintf("\n%-6d %-*s %8s", process.PID, nameWidth, truncateText(process.Name, nameWidth), formatMetricCompact(metric, 1)))
+		name := process.Name
+		if m.showProcessPath {
+			name = processPathDisplay(process)
+		}
+		builder.WriteString(fmt.Sprintf("\n%-6d %-*s %8s", process.PID, nameWidth, truncateText(name, nameWidth), formatMetricCompact(metric, 1)))
 	}
 	return panel(builder.String(), width)
 }
@@ -482,6 +549,9 @@ func (m Model) renderProcesses(height int) string {
 	detailHeight := 0
 	if m.showProcessDetail {
 		detailHeight = 6
+		if m.showProcessPath {
+			detailHeight++
+		}
 	}
 	rows := max(1, height-3-detailHeight)
 	start := 0
@@ -501,23 +571,27 @@ func (m Model) renderProcesses(height int) string {
 	builder.WriteString(mutedStyle.Render("  sorted by " + sortName))
 	builder.WriteString("\n")
 	if full {
-		builder.WriteString(fmt.Sprintf("%-7s %-*s %8s %11s %7s", "PID", nameWidth, "NAME", "CPU", "MEMORY", "THREADS"))
+		builder.WriteString(fmt.Sprintf("%-7s %-*s %8s %11s %7s", "PID", nameWidth, processNameHeading(m.showProcessPath), "CPU", "MEMORY", "THREADS"))
 	} else if medium {
 		nameWidth = max(8, m.width-27)
-		builder.WriteString(fmt.Sprintf("%-7s %-*s %8s %10s", "PID", nameWidth, "NAME", "CPU", "MEMORY"))
+		builder.WriteString(fmt.Sprintf("%-7s %-*s %8s %10s", "PID", nameWidth, processNameHeading(m.showProcessPath), "CPU", "MEMORY"))
 	} else {
 		nameWidth = max(6, m.width-18)
-		builder.WriteString(fmt.Sprintf("%-6s %-*s %8s", "PID", nameWidth, "NAME", "CPU"))
+		builder.WriteString(fmt.Sprintf("%-6s %-*s %8s", "PID", nameWidth, processNameHeading(m.showProcessPath), "CPU"))
 	}
 	for index := start; index < end; index++ {
 		process := processes[index]
+		name := process.Name
+		if m.showProcessPath {
+			name = processPathDisplay(process)
+		}
 		var row string
 		if full {
-			row = fmt.Sprintf("%-7d %-*s %8s %11s %7d", process.PID, nameWidth, truncateText(process.Name, nameWidth), formatMetricCompact(process.CPU, 1), formatMetricCompact(process.Memory, 1), process.Threads)
+			row = fmt.Sprintf("%-7d %-*s %8s %11s %7d", process.PID, nameWidth, truncateText(name, nameWidth), formatMetricCompact(process.CPU, 1), formatMetricCompact(process.Memory, 1), process.Threads)
 		} else if medium {
-			row = fmt.Sprintf("%-7d %-*s %8s %10s", process.PID, nameWidth, truncateText(process.Name, nameWidth), formatMetricCompact(process.CPU, 1), formatMetricCompact(process.Memory, 1))
+			row = fmt.Sprintf("%-7d %-*s %8s %10s", process.PID, nameWidth, truncateText(name, nameWidth), formatMetricCompact(process.CPU, 1), formatMetricCompact(process.Memory, 1))
 		} else {
-			row = fmt.Sprintf("%-6d %-*s %8s", process.PID, nameWidth, truncateText(process.Name, nameWidth), formatMetricCompact(process.CPU, 1))
+			row = fmt.Sprintf("%-6d %-*s %8s", process.PID, nameWidth, truncateText(name, nameWidth), formatMetricCompact(process.CPU, 1))
 		}
 		builder.WriteString("\n")
 		if index == m.selected {
@@ -528,17 +602,37 @@ func (m Model) renderProcesses(height int) string {
 	}
 	if m.showProcessDetail && m.selected < len(processes) {
 		builder.WriteString("\n")
-		builder.WriteString(processDetailPanel(processes[m.selected], m.width))
+		builder.WriteString(processDetailPanel(processes[m.selected], m.width, m.showProcessPath))
 	}
 	return builder.String()
 }
 
-func processDetailPanel(process model.ProcessInfo, width int) string {
+func processNameHeading(showPath bool) string {
+	if showPath {
+		return "PATH"
+	}
+	return "NAME"
+}
+
+func processPathDisplay(process model.ProcessInfo) string {
+	if process.Path != "" {
+		return process.Path
+	}
+	if process.Name != "" {
+		return "[" + process.Name + "]"
+	}
+	return "N/A"
+}
+
+func processDetailPanel(process model.ProcessInfo, width int, showPath bool) string {
 	inner := max(8, width-4)
 	var builder strings.Builder
 	builder.WriteString(titleStyle.Render("PROCESS DETAIL"))
 	builder.WriteString(fmt.Sprintf("  %s", truncateText(process.Name, max(6, inner-24))))
 	builder.WriteString(fmt.Sprintf("\nPID %d  Threads %d  CPU %s  Memory %s", process.PID, process.Threads, formatMetric(process.CPU, 1), formatMetric(process.Memory, 1)))
+	if showPath {
+		builder.WriteString("\nPath        " + truncateText(processPathDisplay(process), max(6, inner-12)))
+	}
 	if process.CPU.Source != "" {
 		builder.WriteString("\nCPU source  " + truncateText(process.CPU.Source, max(6, inner-12)))
 	}

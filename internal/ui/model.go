@@ -43,6 +43,7 @@ type Model struct {
 	page              page
 	showHelp          bool
 	showProcessDetail bool
+	showProcessPath   bool
 	processSort       processSort
 	selected          int
 	scrollOffset      int
@@ -175,6 +176,12 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.scrollOffset++
 			}
 			m.clampScroll()
+			return m, nil
+		}
+
+		if key.Matches(message, m.keys.Paths) &&
+			(m.page == pageAll || m.page == pageMemory || m.page == pageProcesses) {
+			m.showProcessPath = !m.showProcessPath
 			return m, nil
 		}
 

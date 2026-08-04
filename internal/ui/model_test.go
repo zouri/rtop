@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -165,33 +166,133 @@ func TestHelpIsOverlayAndDoesNotChangeCollectionScope(t *testing.T) {
 	}
 }
 
-func TestViewNeverExceedsTerminalWidth(t *testing.T) {
-	for _, width := range []int{32, 80, 120} {
-		uiModel := NewModel(make(chan model.Snapshot), nil)
-		updated, _ := uiModel.Update(tea.WindowSizeMsg{Width: width, Height: 24})
-		uiModel = updated.(Model)
-		updated, _ = uiModel.Update(snapshotMsg{snapshot: testSnapshot()})
-		uiModel = updated.(Model)
-		for _, currentPage := range []page{pageAll, pageCPU, pageMemory, pageEngines, pageProcesses, pageInfo} {
-			uiModel.page = currentPage
-			view := uiModel.View()
-			for lineNumber, line := range strings.Split(view, "\n") {
-				if got := ansi.StringWidth(line); got > width {
-					t.Fatalf("width %d page %d line %d rendered %d cells: %q", width, currentPage, lineNumber+1, got, line)
-				}
-			}
-			if got := lipgloss.Height(view); got > uiModel.height {
-				t.Fatalf("width %d page %d rendered %d lines for height %d", width, currentPage, got, uiModel.height)
-			}
-		}
-		uiModel.showHelp = true
-		helpView := uiModel.View()
-		for lineNumber, line := range strings.Split(helpView, "\n") {
-			if got := ansi.StringWidth(line); got > width {
-				t.Fatalf("width %d help line %d rendered %d cells: %q", width, lineNumber+1, got, line)
-			}
+func TestProcessPathShortcutTogglesExecutablePaths(t *testing.T) {
+	snapshot := testSnapshot()
+	snapshot.Processes = append(snapshot.Processes, model.ProcessInfo{
+		PID: 101, Name: "rcuos/6",
+		CPU:    model.AvailableMetric(1, "%", "/proc/101/stat", snapshot.Timestamp),
+		Memory: model.AvailableMetric(0, "MiB", "/proc/101/stat", snapshot.Timestamp),
+	})
+	uiModel := NewModel(make(chan model.Snapshot), nil)
+	updated, _ := uiModel.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	uiModel = updated.(Model)
+	updated, _ = uiModel.Update(snapshotMsg{snapshot: snapshot})
+	uiModel = updated.(Model)
+	uiModel.page = pageProcesses
+
+	if view := ansi.Strip(uiModel.View()); strings.Contains(view, "/usr/bin/fixture-worker") {
+		t.Fatalf("process path is visible before toggling:\n%s", view)
+	}
+	updated, _ = uiModel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	uiModel = updated.(Model)
+	if !uiModel.showProcessPath {
+		t.Fatal("process path toggle was not enabled")
+	}
+	view := ansi.Strip(uiModel.View())
+	for _, expected := range []string{"PATH", "/usr/bin/fixture-worker", "[rcuos/6]", "p paths"} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("process page is missing %q after path toggle:\n%s", expected, view)
 		}
 	}
+	if strings.Contains(view, "N/A") {
+		t.Fatalf("named process without an executable path rendered as N/A:\n%s", view)
+	}
+
+	updated, _ = uiModel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	uiModel = updated.(Model)
+	if uiModel.showProcessPath || strings.Contains(ansi.Strip(uiModel.View()), "/usr/bin/fixture-worker") {
+		t.Fatal("process path toggle was not disabled")
+	}
+}
+
+func TestViewNeverExceedsTerminalWidth(t *testing.T) {
+	for _, width := range []int{1, 8, 20, 24, 32, 47, 48, 55, 56, 65, 66, 71, 72, 87, 88, 120} {
+		for _, height := range []int{1, 2, 3, 5, 7, 8, 12, 24, 40} {
+			uiModel := NewModel(make(chan model.Snapshot), nil)
+			updated, _ := uiModel.Update(tea.WindowSizeMsg{Width: width, Height: height})
+			uiModel = updated.(Model)
+			updated, _ = uiModel.Update(snapshotMsg{snapshot: testSnapshot()})
+			uiModel = updated.(Model)
+			for _, currentPage := range []page{pageAll, pageCPU, pageMemory, pageEngines, pageProcesses, pageInfo} {
+				uiModel.page = currentPage
+				for _, showPath := range []bool{false, true} {
+					uiModel.showProcessPath = showPath
+					assertViewFitsTerminal(t, uiModel)
+				}
+			}
+			uiModel.showHelp = true
+			assertViewFitsTerminal(t, uiModel)
+		}
+	}
+}
+
+func assertViewFitsTerminal(t *testing.T, uiModel Model) {
+	t.Helper()
+	view := uiModel.View()
+	for lineNumber, line := range strings.Split(view, "\n") {
+		if got := ansi.StringWidth(line); got > uiModel.width {
+			t.Fatalf("%dx%d page %d line %d rendered %d cells: %q", uiModel.width, uiModel.height, uiModel.page, lineNumber+1, got, line)
+		}
+	}
+	if got := lipgloss.Height(view); got > uiModel.height {
+		t.Fatalf("%dx%d page %d rendered %d lines", uiModel.width, uiModel.height, uiModel.page, got)
+	}
+}
+
+func TestSmallTerminalShowsResizeGuidance(t *testing.T) {
+	uiModel := NewModel(make(chan model.Snapshot), nil)
+	updated, _ := uiModel.Update(tea.WindowSizeMsg{Width: 20, Height: 5})
+	uiModel = updated.(Model)
+	view := ansi.Strip(uiModel.View())
+	for _, expected := range []string{"rtop", "Terminal 20x5", "Minimum 24x8"} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("small-terminal view is missing %q:\n%s", expected, view)
+		}
+	}
+	assertViewFitsTerminal(t, uiModel)
+
+	updated, _ = uiModel.Update(tea.WindowSizeMsg{Width: 24, Height: 8})
+	uiModel = updated.(Model)
+	updated, _ = uiModel.Update(snapshotMsg{snapshot: testSnapshot()})
+	uiModel = updated.(Model)
+	view = ansi.Strip(uiModel.View())
+	if strings.Contains(view, "Minimum 24x8") || !strings.Contains(view, "CPU") {
+		t.Fatalf("normal UI was not restored after resize:\n%s", view)
+	}
+	assertViewFitsTerminal(t, uiModel)
+}
+
+func TestProcessSelectionRemainsVisibleAfterResize(t *testing.T) {
+	now := time.Now()
+	snapshot := testSnapshot()
+	snapshot.Processes = make([]model.ProcessInfo, 12)
+	for index := range snapshot.Processes {
+		snapshot.Processes[index] = model.ProcessInfo{
+			PID:  index + 1,
+			Name: fmt.Sprintf("proc%02d", index+1),
+			CPU:  model.AvailableMetric(float64(12-index), "%", fmt.Sprintf("/proc/%d/stat", index+1), now),
+		}
+	}
+
+	uiModel := NewModel(make(chan model.Snapshot), nil)
+	updated, _ := uiModel.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	uiModel = updated.(Model)
+	updated, _ = uiModel.Update(snapshotMsg{snapshot: snapshot})
+	uiModel = updated.(Model)
+	uiModel.page = pageProcesses
+	uiModel.selected = len(snapshot.Processes) - 1
+	uiModel.showProcessDetail = true
+
+	updated, _ = uiModel.Update(tea.WindowSizeMsg{Width: 24, Height: 8})
+	uiModel = updated.(Model)
+	view := ansi.Strip(uiModel.View())
+	if !strings.Contains(view, "proc12") {
+		t.Fatalf("selected process disappeared after resize:\n%s", view)
+	}
+	if uiModel.selected != 11 {
+		t.Fatalf("selected process changed after resize: %d", uiModel.selected)
+	}
+	assertViewFitsTerminal(t, uiModel)
 }
 
 func TestStandardTerminalOverviewIncludesEngines(t *testing.T) {
@@ -205,6 +306,65 @@ func TestStandardTerminalOverviewIncludesEngines(t *testing.T) {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("overview is missing %q:\n%s", expected, view)
 		}
+	}
+}
+
+func TestAllPageRendersTopFiveProcessesOnSeparateRows(t *testing.T) {
+	now := time.Now()
+	snapshot := testSnapshot()
+	snapshot.Processes = make([]model.ProcessInfo, 6)
+	for index := range snapshot.Processes {
+		rank := index + 1
+		snapshot.Processes[index] = model.ProcessInfo{
+			PID:  100 + rank,
+			Name: fmt.Sprintf("cpu-rank-%d", rank),
+			CPU:  model.AvailableMetric(float64(100-rank), "%", fmt.Sprintf("/proc/%d/stat", 100+rank), now),
+			Memory: model.AvailableMetric(
+				float64(rank*100), "MiB", fmt.Sprintf("/proc/%d/status", 100+rank), now,
+			),
+		}
+	}
+
+	uiModel := NewModel(make(chan model.Snapshot), nil)
+	updated, _ := uiModel.Update(tea.WindowSizeMsg{Width: 80, Height: 40})
+	uiModel = updated.(Model)
+	updated, _ = uiModel.Update(snapshotMsg{snapshot: snapshot})
+	uiModel = updated.(Model)
+	view := ansi.Strip(uiModel.renderAll(0))
+
+	for _, line := range strings.Split(view, "\n") {
+		titles := 0
+		for _, title := range []string{"ROCKCHIP ENGINES", "TOP PROCESSES · CPU", "TOP PROCESSES · MEMORY"} {
+			if strings.Contains(line, title) {
+				titles++
+			}
+		}
+		if titles > 1 {
+			t.Fatalf("overview cards share a row: %q", line)
+		}
+	}
+	cpuStart := strings.Index(view, "TOP PROCESSES · CPU")
+	memoryStart := strings.Index(view, "TOP PROCESSES · MEMORY")
+	if cpuStart < 0 || memoryStart < 0 || memoryStart <= cpuStart {
+		t.Fatalf("ALL page process cards are missing or out of order:\n%s", view)
+	}
+	cpuView := view[cpuStart:memoryStart]
+	memoryView := view[memoryStart:]
+	for rank := 1; rank <= 5; rank++ {
+		if name := fmt.Sprintf("cpu-rank-%d", rank); !strings.Contains(cpuView, name) {
+			t.Fatalf("CPU process card is missing %q:\n%s", name, cpuView)
+		}
+	}
+	if strings.Contains(cpuView, "cpu-rank-6") {
+		t.Fatalf("CPU process card rendered more than five processes:\n%s", cpuView)
+	}
+	for rank := 2; rank <= 6; rank++ {
+		if name := fmt.Sprintf("cpu-rank-%d", rank); !strings.Contains(memoryView, name) {
+			t.Fatalf("memory process card is missing %q:\n%s", name, memoryView)
+		}
+	}
+	if strings.Contains(memoryView, "cpu-rank-1") {
+		t.Fatalf("memory process card rendered more than five processes:\n%s", memoryView)
 	}
 }
 
@@ -345,7 +505,7 @@ func testSnapshot() model.Snapshot {
 			ControlMode: model.AvailableTextMetric("automatic", "/sys/hwmon/pwm1_enable", now),
 		}},
 		Processes: []model.ProcessInfo{{
-			PID: 100, Name: "fixture worker",
+			PID: 100, Name: "fixture worker", Path: "/usr/bin/fixture-worker",
 			CPU:     model.AvailableMetric(12, "%", "/proc/100/stat", now),
 			Memory:  model.AvailableMetric(20, "MiB", "/proc/100/status", now),
 			Threads: 4,

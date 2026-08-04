@@ -55,6 +55,9 @@ func TestCollectorCalculatesCPUAndMemory(t *testing.T) {
 			"/proc/stat":     nextSystem,
 			"/proc/100/stat": nextProcess,
 		},
+		links: map[string]string{
+			"/proc/100/exe": "/usr/bin/fixture-worker",
+		},
 	}
 	processes, warnings := NewCollector(fixture, time.Nanosecond).Collect(context.Background())
 	if len(warnings) != 0 {
@@ -79,6 +82,9 @@ func TestCollectorCalculatesCPUAndMemory(t *testing.T) {
 	}
 	if process.Threads != 4 {
 		t.Fatalf("threads = %d", process.Threads)
+	}
+	if process.Path != "/usr/bin/fixture-worker" {
+		t.Fatalf("path = %q", process.Path)
 	}
 	if fixture.reads["/proc/100/status"] != 0 {
 		t.Fatalf("status reads = %d, want 0", fixture.reads["/proc/100/status"])
@@ -114,6 +120,7 @@ type sequenceFS struct {
 	sysfs.SystemFS
 	reads map[string]int
 	next  map[string][]byte
+	links map[string]string
 }
 
 func (f *sequenceFS) ReadFile(path string) ([]byte, error) {
@@ -127,4 +134,11 @@ func (f *sequenceFS) ReadFile(path string) ([]byte, error) {
 		}
 	}
 	return f.SystemFS.ReadFile(path)
+}
+
+func (f *sequenceFS) Readlink(path string) (string, error) {
+	if target, ok := f.links[path]; ok {
+		return target, nil
+	}
+	return f.SystemFS.Readlink(path)
 }

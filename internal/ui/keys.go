@@ -19,6 +19,7 @@ type keyMap struct {
 	Details    key.Binding
 	SortCPU    key.Binding
 	SortMemory key.Binding
+	Paths      key.Binding
 	Refresh    key.Binding
 	Quit       key.Binding
 }
@@ -77,6 +78,10 @@ func newKeyMap() keyMap {
 			key.WithKeys("m"),
 			key.WithHelp("m", "sort memory"),
 		),
+		Paths: key.NewBinding(
+			key.WithKeys("p"),
+			key.WithHelp("p", "show/hide paths"),
+		),
 		Refresh: key.NewBinding(
 			key.WithKeys("r"),
 			key.WithHelp("r", "refresh"),
@@ -95,7 +100,7 @@ func (k keyMap) ShortHelp() []key.Binding {
 func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.All, k.CPU, k.Memory, k.Engines, k.Processes, k.Info},
-		{k.Up, k.Down, k.SortCPU, k.SortMemory, k.Details},
+		{k.Up, k.Down, k.SortCPU, k.SortMemory, k.Paths, k.Details},
 		{k.Refresh, k.Help, k.Back, k.Quit},
 	}
 }

@@ -32,6 +32,9 @@ rtop doctor --json
 
 The TUI follows a jtop-style board monitor layout:
 
+The layout responds to terminal resizing down to 24 columns by 8 rows. Smaller
+windows show a compact resize hint instead of drawing clipped cards.
+
 - `1`: ALL board overview.
 - `2`: CPU load, frequency policy, thermal limits, cooling, power and fan detail.
 - `3`: memory, CMA, PSI, zram, load and memory-heavy processes.
@@ -41,6 +44,7 @@ The TUI follows a jtop-style board monitor layout:
 - `?`: show Help without leaving the active page.
 - `↑`/`↓` or `j`/`k`: select a process or scroll a detail page.
 - `c`/`m`: sort processes by CPU or memory.
+- `p`: show or hide executable paths on pages containing process lists.
 - `Enter`: toggle details for the selected process.
 - `r`: request an immediate refresh.
 - `q` or `Ctrl+C`: exit.
