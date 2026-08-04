@@ -11,7 +11,7 @@ import (
 
 func TestSchedulerPublishesLatestAndStops(t *testing.T) {
 	source := &countingSource{}
-	scheduler := NewScheduler(source, 2*time.Millisecond, time.Second)
+	scheduler := NewScheduler(source.Build, 2*time.Millisecond, time.Second)
 	ctx, cancel := context.WithCancel(context.Background())
 	output := scheduler.Run(ctx)
 

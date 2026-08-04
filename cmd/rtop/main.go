@@ -20,11 +20,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	command := app.NewCommand(app.BuildInfo{
-		Version: version,
-		Commit:  commit,
-		Date:    date,
-	}, os.Stdout, os.Stderr)
+	command := app.NewCommand(version, commit, date, os.Stdout, os.Stderr)
 	if err := command.ExecuteContext(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, "rtop:", err)
 		os.Exit(1)

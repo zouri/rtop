@@ -11,7 +11,7 @@ import (
 	"rtop/internal/sysfs"
 )
 
-func TestBuilderKeepsOtherCollectorsWhenCPUFails(t *testing.T) {
+func TestMonitorKeepsOtherCollectorsWhenCPUFails(t *testing.T) {
 	root := filepath.Join("..", "..", "testdata", "generic-linux")
 	base := sysfs.MustNew(root)
 	systemFS := &readErrorFS{
@@ -20,7 +20,7 @@ func TestBuilderKeepsOtherCollectorsWhenCPUFails(t *testing.T) {
 		err:      os.ErrPermission,
 	}
 
-	snapshot := NewBuilder(systemFS, time.Nanosecond).Build(context.Background())
+	snapshot := NewMonitor(systemFS, time.Nanosecond).Snapshot(context.Background())
 	if snapshot.CPU.Overall.Status != model.PermissionDenied {
 		t.Fatalf("CPU status = %q", snapshot.CPU.Overall.Status)
 	}

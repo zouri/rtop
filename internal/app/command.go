@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,50 +14,54 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"rtop/internal/config"
 	"rtop/internal/doctor"
-	"rtop/internal/exporter"
 	"rtop/internal/model"
 	"rtop/internal/sysfs"
 	"rtop/internal/ui"
 )
 
-type BuildInfo struct {
-	Version string
-	Commit  string
-	Date    string
+type runtimeConfig struct {
+	root              string
+	interval          time.Duration
+	cpuSampleDuration time.Duration
+	logLevel          string
 }
 
-func NewCommand(build BuildInfo, stdout, stderr io.Writer) *cobra.Command {
-	runtimeConfig := config.Default()
+func NewCommand(version, commit, date string, stdout, stderr io.Writer) *cobra.Command {
+	config := runtimeConfig{
+		root:              "/",
+		interval:          time.Second,
+		cpuSampleDuration: 200 * time.Millisecond,
+		logLevel:          "warn",
+	}
 	command := &cobra.Command{
 		Use:           "rtop",
 		Short:         "Read-only Rockchip Linux system monitor",
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		Version:       build.Version,
+		Version:       version,
 		RunE: func(command *cobra.Command, _ []string) error {
-			return runTUI(command.Context(), runtimeConfig, stdout)
+			return runTUI(command.Context(), config, stdout)
 		},
 	}
 	command.SetOut(stdout)
 	command.SetErr(stderr)
 	command.SetVersionTemplate(fmt.Sprintf(
-		"rtop %s (commit %s, built %s)\n", build.Version, build.Commit, build.Date,
+		"rtop %s (commit %s, built %s)\n", version, commit, date,
 	))
-	command.PersistentFlags().StringVar(&runtimeConfig.Root, "root", runtimeConfig.Root, "target system root (for fixtures and containers)")
-	command.PersistentFlags().DurationVar(&runtimeConfig.Interval, "interval", runtimeConfig.Interval, "TUI and snapshot watch refresh interval")
-	command.PersistentFlags().DurationVar(&runtimeConfig.CPUSampleDuration, "cpu-sample", runtimeConfig.CPUSampleDuration, "CPU usage sampling window")
-	command.PersistentFlags().StringVar(&runtimeConfig.LogLevel, "log-level", runtimeConfig.LogLevel, "log level: debug, info, warn, error")
+	command.PersistentFlags().StringVar(&config.root, "root", config.root, "target system root (for fixtures and containers)")
+	command.PersistentFlags().DurationVar(&config.interval, "interval", config.interval, "TUI and snapshot watch refresh interval")
+	command.PersistentFlags().DurationVar(&config.cpuSampleDuration, "cpu-sample", config.cpuSampleDuration, "CPU usage sampling window")
+	command.PersistentFlags().StringVar(&config.logLevel, "log-level", config.logLevel, "log level: debug, info, warn, error")
 
 	command.PersistentPreRunE = func(_ *cobra.Command, _ []string) error {
-		if runtimeConfig.Interval <= 0 {
+		if config.interval <= 0 {
 			return errors.New("--interval must be greater than zero")
 		}
-		if runtimeConfig.CPUSampleDuration <= 0 {
+		if config.cpuSampleDuration <= 0 {
 			return errors.New("--cpu-sample must be greater than zero")
 		}
-		level, err := parseLogLevel(runtimeConfig.LogLevel)
+		level, err := parseLogLevel(config.logLevel)
 		if err != nil {
 			return err
 		}
@@ -64,43 +69,39 @@ func NewCommand(build BuildInfo, stdout, stderr io.Writer) *cobra.Command {
 		return nil
 	}
 
-	command.AddCommand(newInfoCommand(&runtimeConfig, stdout))
-	command.AddCommand(newSnapshotCommand(&runtimeConfig, stdout))
-	command.AddCommand(newDoctorCommand(&runtimeConfig, stdout))
+	command.AddCommand(newInfoCommand(&config, stdout))
+	command.AddCommand(newSnapshotCommand(&config, stdout))
+	command.AddCommand(newDoctorCommand(&config, stdout))
 	return command
 }
 
-func runTUI(ctx context.Context, runtimeConfig config.Runtime, stdout io.Writer) error {
-	systemFS, err := sysfs.New(runtimeConfig.Root)
+func runTUI(ctx context.Context, config runtimeConfig, stdout io.Writer) error {
+	systemFS, err := sysfs.New(config.root)
 	if err != nil {
 		return err
 	}
-	builder := NewBuilder(systemFS, runtimeConfig.CPUSampleDuration)
-	scheduler := NewScheduler(builder, runtimeConfig.Interval, max(runtimeConfig.Interval, time.Second))
+	monitor := NewMonitor(systemFS, config.cpuSampleDuration)
+	scheduler := NewScheduler(monitor.Snapshot, config.interval, max(config.interval, time.Second))
 	tuiContext, cancel := context.WithCancel(ctx)
 	defer cancel()
-	refresh := func() {
-		builder.Reprobe()
-		scheduler.Refresh()
-	}
-	return ui.Run(tuiContext, scheduler.Run(tuiContext), refresh, stdout)
+	return ui.Run(tuiContext, scheduler.Run(tuiContext), scheduler.Refresh, stdout)
 }
 
-func newInfoCommand(runtimeConfig *config.Runtime, stdout io.Writer) *cobra.Command {
+func newInfoCommand(config *runtimeConfig, stdout io.Writer) *cobra.Command {
 	var asJSON bool
 	command := &cobra.Command{
 		Use:   "info",
 		Short: "Show board, SoC, kernel and operating system information",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			systemFS, err := sysfs.New(runtimeConfig.Root)
+			systemFS, err := sysfs.New(config.root)
 			if err != nil {
 				return err
 			}
-			builder := NewBuilder(systemFS, runtimeConfig.CPUSampleDuration)
-			info, warnings := builder.SystemInfo()
+			monitor := NewMonitor(systemFS, config.cpuSampleDuration)
+			info, warnings := monitor.SystemInfo()
 			if asJSON {
-				return exporter.WriteJSON(stdout, struct {
+				return writeJSON(stdout, struct {
 					System   model.SystemInfo `json:"system"`
 					Warnings []model.Warning  `json:"warnings"`
 				}{System: info, Warnings: warnings}, true)
@@ -116,7 +117,7 @@ func newInfoCommand(runtimeConfig *config.Runtime, stdout io.Writer) *cobra.Comm
 	return command
 }
 
-func newSnapshotCommand(runtimeConfig *config.Runtime, stdout io.Writer) *cobra.Command {
+func newSnapshotCommand(config *runtimeConfig, stdout io.Writer) *cobra.Command {
 	var asJSON bool
 	var watch bool
 	command := &cobra.Command{
@@ -124,7 +125,7 @@ func newSnapshotCommand(runtimeConfig *config.Runtime, stdout io.Writer) *cobra.
 		Short: "Collect a system snapshot",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
-			return runSnapshot(command.Context(), *runtimeConfig, stdout, asJSON || watch, watch)
+			return runSnapshot(command.Context(), *config, stdout, asJSON || watch, watch)
 		},
 	}
 	command.Flags().BoolVar(&asJSON, "json", false, "output JSON")
@@ -132,21 +133,21 @@ func newSnapshotCommand(runtimeConfig *config.Runtime, stdout io.Writer) *cobra.
 	return command
 }
 
-func newDoctorCommand(runtimeConfig *config.Runtime, stdout io.Writer) *cobra.Command {
+func newDoctorCommand(config *runtimeConfig, stdout io.Writer) *cobra.Command {
 	var asJSON bool
 	command := &cobra.Command{
 		Use:   "doctor",
 		Short: "Diagnose platform detection, drivers, permissions and metric sources",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
-			systemFS, err := sysfs.New(runtimeConfig.Root)
+			systemFS, err := sysfs.New(config.root)
 			if err != nil {
 				return err
 			}
-			builder := NewBuilder(systemFS, runtimeConfig.CPUSampleDuration)
-			report := doctor.Analyze(systemFS, builder.Build(command.Context()))
+			monitor := NewMonitor(systemFS, config.cpuSampleDuration)
+			report := doctor.Analyze(systemFS, monitor.Snapshot(command.Context()))
 			if asJSON {
-				return exporter.WriteJSON(stdout, report, true)
+				return writeJSON(stdout, report, true)
 			}
 			return doctor.WriteText(stdout, report)
 		},
@@ -155,32 +156,36 @@ func newDoctorCommand(runtimeConfig *config.Runtime, stdout io.Writer) *cobra.Co
 	return command
 }
 
-func runSnapshot(ctx context.Context, runtimeConfig config.Runtime, stdout io.Writer, asJSON, watch bool) error {
-	systemFS, err := sysfs.New(runtimeConfig.Root)
+func runSnapshot(ctx context.Context, config runtimeConfig, stdout io.Writer, asJSON, watch bool) error {
+	systemFS, err := sysfs.New(config.root)
 	if err != nil {
 		return err
 	}
-	builder := NewBuilder(systemFS, runtimeConfig.CPUSampleDuration)
+	monitor := NewMonitor(systemFS, config.cpuSampleDuration)
 	if watch {
-		scheduler := NewScheduler(builder, runtimeConfig.Interval, max(runtimeConfig.Interval, time.Second))
+		scheduler := NewScheduler(monitor.Snapshot, config.interval, max(config.interval, time.Second))
 		for snapshot := range scheduler.Run(ctx) {
-			if err := exporter.WriteJSON(stdout, snapshot, false); err != nil {
+			if err := writeJSON(stdout, snapshot, false); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
-	for {
-		snapshot := builder.Build(ctx)
-		if asJSON {
-			if err := exporter.WriteJSON(stdout, snapshot, !watch); err != nil {
-				return err
-			}
-		} else {
-			printSnapshot(stdout, snapshot)
-		}
-		return nil
+	snapshot := monitor.Snapshot(ctx)
+	if asJSON {
+		return writeJSON(stdout, snapshot, true)
 	}
+	printSnapshot(stdout, snapshot)
+	return nil
+}
+
+func writeJSON(writer io.Writer, value any, pretty bool) error {
+	encoder := json.NewEncoder(writer)
+	encoder.SetEscapeHTML(false)
+	if pretty {
+		encoder.SetIndent("", "  ")
+	}
+	return encoder.Encode(value)
 }
 
 func printSystemInfo(writer io.Writer, info model.SystemInfo) {

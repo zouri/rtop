@@ -62,13 +62,13 @@ rtop 是面向 Rockchip Linux 平台的终端系统监控工具，目标体验�
 /proc、sysfs、debugfs、device-tree
                 │
                 ▼
-          平台与能力探测
+             平台探测
                 │
                 ▼
-   CPU/GPU/NPU/温度等 Collector
+ CPU/内存/进程/温度/加速器采集
                 │
                 ▼
-          Snapshot Builder
+          Monitor.Snapshot
                 │
                 ▼
        ┌────────┼────────┐
@@ -76,14 +76,13 @@ rtop 是面向 Rockchip Linux 平台的终端系统监控工具，目标体验�
       TUI      JSON     doctor
 ~~~
 
-系统划分为以下层次：
+系统只保留以下层次：
 
 1. SystemFS：统一访问 procfs、sysfs、debugfs 和 Device Tree，并支持测试根目录替换。
 2. Platform Detector：识别 Linux、Rockchip、SoC、板卡、内核及驱动版本。
-3. Capability Discovery：扫描系统节点，确定设备支持哪些指标以及当前读取权限。
-4. Collectors：独立采集 CPU、内存、温度、GPU、NPU 等数据。
-5. Snapshot Builder：将一次采样组合成不可变系统快照。
-6. Output：将统一快照提供给 TUI、JSON exporter 和 doctor。
+3. Collectors：按 CPU、内存、进程、温度和加速器五个当前业务域采集数据；GPU/NPU/DDR 共用一个加速器采集器。
+4. Monitor：并行采集并直接组合不可变系统快照。
+5. Output：命令层直接将统一快照提供给 TUI、JSON 和 doctor。
 
 UI 不直接读取系统文件，Collector 也不包含任何终端展示逻辑。
 
@@ -95,28 +94,17 @@ rtop/
 │   └── rtop/
 │       └── main.go
 ├── internal/
-│   ├── app/                  # 生命周期和采样调度
-│   ├── config/               # CLI 配置
+│   ├── app/                  # CLI、Monitor 和采样调度
 │   ├── model/                # Snapshot 和指标模型
 │   ├── sysfs/                # 可测试的文件访问封装
-│   ├── platform/
-│   │   ├── detector.go
-│   │   ├── linux/
-│   │   └── rockchip/
+│   ├── platform/             # Linux/Rockchip 平台识别
 │   ├── collector/
+│   │   ├── accelerator/      # GPU/NPU/DDR 共用 devfreq 扫描
 │   │   ├── cpu/
 │   │   ├── memory/
 │   │   ├── process/
-│   │   ├── thermal/
-│   │   ├── devfreq/
-│   │   ├── gpu/
-│   │   └── npu/
-│   ├── ui/
-│   │   ├── overview.go
-│   │   ├── engines.go
-│   │   ├── processes.go
-│   │   └── system.go
-│   ├── exporter/
+│   │   └── thermal/
+│   ├── ui/                   # Bubble Tea 状态与渲染
 │   └── doctor/
 ├── testdata/
 │   ├── generic-linux/
@@ -145,17 +133,19 @@ type SystemFS interface {
 
 生产环境实现读取真实根文件系统。测试环境将根路径映射到 testdata，从而在没有 Rockchip 硬件的开发机上运行完整采集测试。
 
-### 6.2 Collector 接口
+### 6.2 直接依赖具体采集器
 
 ~~~go
-type Collector interface {
-    Name() string
-    Probe(ctx context.Context) Capability
-    Collect(ctx context.Context) ([]Metric, error)
+type Monitor struct {
+    cpu         *cpu.Collector
+    accelerator *accelerator.Collector
+    memory      *memory.Collector
+    process     *process.Collector
+    thermal     *thermal.Collector
 }
 ~~~
 
-Probe 在启动时发现数据源、权限和能力；Collect 只执行采样，避免每次刷新都进行大规模目录扫描。
+当前没有第二套采集器实现，因此不定义统一 Collector 接口。Monitor 直接依赖具体类型；加速器节点只在启动时扫描一次，刷新只采样已有节点。
 
 ### 6.3 快照模型
 
@@ -212,7 +202,7 @@ Rockchip 设备探测不能依赖固定物理地址，推荐按以下优先级�
 4. debugfs 节点特征。
 5. SoC 和特定 BSP 的兼容规则。
 
-Provider 可以维护多个候选数据源。首选源连续读取失败时，可以重新探测并切换到备用源。
+加速器采集器按固定顺序尝试少量已知节点。当前不实现 Provider、策略切换或运行时重探测；新增真实兼容需求时再加。
 
 ## 8. 命令行设计
 
@@ -254,7 +244,7 @@ doctor 只给出诊断信息和修复建议，不自动 mount、chmod 或修改�
 - 上下方向键：选择进程或列表项。
 - c：按 CPU 排序。
 - m：按内存排序。
-- r：重新进行能力探测。
+- r：立即采样一次。
 - ?：帮助。
 - q 或 Ctrl+C：退出。
 
@@ -274,7 +264,6 @@ UI 必须支持窄终端降级布局，不能假设固定终端尺寸。
 
 - 使用根 context 控制整个应用生命周期。
 - 使用固定调度器，而不是每次刷新无限创建 goroutine。
-- Collector 设置独立超时。
 - 限制并行采集数量。
 - Snapshot 通过容量为 1 的通道发送给 UI。
 - UI 繁忙时覆盖或丢弃旧快照，避免数据无限积压。
@@ -317,7 +306,7 @@ UI 必须支持窄终端降级布局，不能假设固定终端尺寸。
 验收标准：
 
 - 终端缩放不会崩溃或破坏布局。
-- Collector 超时不会冻结界面。
+- 采集超时不会冻结界面。
 - q 和 Ctrl+C 能安全退出。
 - 连续运行一小时无明显内存增长或 goroutine 泄漏。
 
@@ -329,9 +318,8 @@ UI 必须支持窄终端降级布局，不能假设固定终端尺寸。
 
 - 实现 Device Tree 和 Rockchip SoC 识别。
 - 扫描并分类 devfreq 设备。
-- 实现 Mali GPU Provider。
-- 实现 RKNPU Provider 和多核心负载解析。
-- 实现 DMC/DDR Provider。
+- 用一个加速器采集器读取 Mali GPU、RKNPU 和 DMC/DDR。
+- 解析 RKNPU 多核心负载。
 - 兼容常见 5.10 和 6.1 BSP 格式。
 - 增加 Engines 页面。
 
@@ -426,7 +414,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" ./cmd/
 
 风险：不同厂商内核中的节点路径和输出格式不同。
 
-策略：动态扫描、Provider 多数据源、fixture 回归测试，避免只按物理地址匹配。
+策略：启动时按名称动态扫描一次，并用 fixture 回归测试覆盖已知格式；不为尚未出现的驱动变体预设 Provider 层。
 
 ### 14.2 debugfs 权限限制
 

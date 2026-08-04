@@ -7,20 +7,16 @@ import (
 	"rtop/internal/model"
 )
 
-type SnapshotSource interface {
-	Build(ctx context.Context) model.Snapshot
-}
-
 // Scheduler performs one collection at a time and publishes only the newest
 // snapshot. Slow consumers never cause an unbounded queue.
 type Scheduler struct {
-	source   SnapshotSource
+	build    func(context.Context) model.Snapshot
 	interval time.Duration
 	timeout  time.Duration
 	refresh  chan struct{}
 }
 
-func NewScheduler(source SnapshotSource, interval, timeout time.Duration) *Scheduler {
+func NewScheduler(build func(context.Context) model.Snapshot, interval, timeout time.Duration) *Scheduler {
 	if interval <= 0 {
 		interval = time.Second
 	}
@@ -31,7 +27,7 @@ func NewScheduler(source SnapshotSource, interval, timeout time.Duration) *Sched
 		}
 	}
 	return &Scheduler{
-		source: source, interval: interval, timeout: timeout, refresh: make(chan struct{}, 1),
+		build: build, interval: interval, timeout: timeout, refresh: make(chan struct{}, 1),
 	}
 }
 
@@ -66,7 +62,7 @@ func (s *Scheduler) Refresh() {
 
 func (s *Scheduler) publish(parent context.Context, output chan model.Snapshot) {
 	ctx, cancel := context.WithTimeout(parent, s.timeout)
-	snapshot := s.source.Build(ctx)
+	snapshot := s.build(ctx)
 	cancel()
 	if parent.Err() != nil {
 		return

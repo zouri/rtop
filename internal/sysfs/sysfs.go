@@ -45,10 +45,6 @@ func MustNew(root string) *RootFS {
 	return systemFS
 }
 
-func (f *RootFS) Root() string {
-	return f.root
-}
-
 func (f *RootFS) ReadFile(path string) ([]byte, error) {
 	return os.ReadFile(f.resolve(path))
 }
