@@ -52,6 +52,28 @@ func TestParseLoadavg(t *testing.T) {
 	}
 }
 
+func TestParsePressure(t *testing.T) {
+	values, err := ParsePressure([]byte(
+		"some avg10=1.25 avg60=0.75 avg300=0.50 total=234567\n" +
+			"full avg10=0.40 avg60=0.20 avg300=0.10 total=34567\n",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if values["some"].Avg10 != 1.25 || values["full"].Total != 34567 {
+		t.Fatalf("values = %#v", values)
+	}
+	for _, input := range []string{
+		"",
+		"some avg10=nope avg60=0 avg300=0 total=0\n",
+		"other avg10=0 avg60=0 avg300=0 total=0\n",
+	} {
+		if _, err := ParsePressure([]byte(input)); err == nil {
+			t.Fatalf("ParsePressure(%q) succeeded", input)
+		}
+	}
+}
+
 func TestCollectorFromFixture(t *testing.T) {
 	root := filepath.Join("..", "..", "..", "testdata", "generic-linux")
 	memoryInfo, loadInfo, warnings := NewCollector(sysfs.MustNew(root)).Collect()
@@ -66,5 +88,30 @@ func TestCollectorFromFixture(t *testing.T) {
 	}
 	if loadInfo.Tasks.Value == nil || *loadInfo.Tasks.Value != 512 {
 		t.Fatalf("tasks = %#v", loadInfo.Tasks)
+	}
+	if memoryInfo.CMATotal.Value == nil || *memoryInfo.CMATotal.Value != 500 ||
+		memoryInfo.CMAUsed.Value == nil || *memoryInfo.CMAUsed.Value != 125 {
+		t.Fatalf("CMA = total %#v used %#v", memoryInfo.CMATotal, memoryInfo.CMAUsed)
+	}
+	if memoryInfo.Pressure.Memory.Some.Avg10.Value == nil ||
+		*memoryInfo.Pressure.Memory.Some.Avg10.Value != 1.25 ||
+		memoryInfo.Pressure.Memory.Full.Avg10.Value == nil ||
+		*memoryInfo.Pressure.Memory.Full.Avg10.Value != 0.40 {
+		t.Fatalf("pressure = %#v", memoryInfo.Pressure.Memory)
+	}
+	if len(memoryInfo.ZRAM) != 1 || memoryInfo.ZRAM[0].MemoryUsed.Value == nil ||
+		*memoryInfo.ZRAM[0].MemoryUsed.Value != 224 || memoryInfo.ZRAM[0].Algorithm.Value == nil ||
+		*memoryInfo.ZRAM[0].Algorithm.Value != "zstd" {
+		t.Fatalf("zram = %#v", memoryInfo.ZRAM)
+	}
+}
+
+func TestParseZRAMMMStat(t *testing.T) {
+	original, compressed, used, err := parseZRAMMMStat([]byte("100 50 75 0 0\n"))
+	if err != nil || original != 100 || compressed != 50 || used != 75 {
+		t.Fatalf("values = %d %d %d, err=%v", original, compressed, used, err)
+	}
+	if _, _, _, err := parseZRAMMMStat([]byte("100 nope")); err == nil {
+		t.Fatal("malformed mm_stat succeeded")
 	}
 }

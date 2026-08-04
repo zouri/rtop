@@ -19,6 +19,15 @@ func TestCollectorFromKernel61Fixture(t *testing.T) {
 	}
 	assertMetric(t, accelerators[0].Usage, 12)
 	assertMetric(t, accelerators[0].Frequency, 1000)
+	if accelerators[0].Policy == nil || accelerators[0].Policy.Minimum.Value == nil ||
+		*accelerators[0].Policy.Minimum.Value != 200 || accelerators[0].Policy.Maximum.Value == nil ||
+		*accelerators[0].Policy.Maximum.Value != 1000 || accelerators[0].Policy.Governor.Value == nil ||
+		*accelerators[0].Policy.Governor.Value != "simple_ondemand" {
+		t.Fatalf("GPU policy = %#v", accelerators[0].Policy)
+	}
+	if accelerators[0].RuntimeStatus.Value == nil || *accelerators[0].RuntimeStatus.Value != "active" {
+		t.Fatalf("GPU runtime status = %#v", accelerators[0].RuntimeStatus)
+	}
 	assertMetric(t, accelerators[1].Usage, 20)
 	assertMetric(t, accelerators[1].Frequency, 900)
 	assertMetric(t, accelerators[2].Usage, 28)
@@ -121,6 +130,9 @@ func TestCollectorTreatsRuntimeSuspendedNPUAsIdle(t *testing.T) {
 	if npu.Frequency.Status != model.Stale || npu.Frequency.Value != nil {
 		t.Fatalf("NPU frequency = %#v", npu.Frequency)
 	}
+	if npu.RuntimeStatus.Value == nil || *npu.RuntimeStatus.Value != "suspended" {
+		t.Fatalf("NPU runtime status = %#v", npu.RuntimeStatus)
+	}
 	if len(npu.Cores) != 3 {
 		t.Fatalf("NPU cores = %#v", npu.Cores)
 	}
@@ -196,7 +208,7 @@ type suspendedNPUFS struct {
 }
 
 func (f *suspendedNPUFS) ReadFile(path string) ([]byte, error) {
-	if strings.HasSuffix(path, "/device/power/runtime_status") {
+	if strings.Contains(path, "/fdab0000.npu/") && strings.HasSuffix(path, "/device/power/runtime_status") {
 		if f.watchDynamicReads {
 			f.runtimeStatusReads++
 		}

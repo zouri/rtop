@@ -20,3 +20,12 @@ Status definitions:
 Missing or inaccessible metrics retain an explicit status such as
 `unsupported`, `permission_denied` or `unavailable`; they are not converted
 to zero.
+
+CPU/devfreq policy limits, runtime power state, PSI, CMA, zram, thermal trip
+points and cooling devices are capability-probed on every platform. Their
+availability depends on the kernel configuration, BSP and board Device Tree;
+absence does not reduce the generic support level in the table above.
+
+Board voltage, current, power, energy and fan/PWM metrics are likewise
+capability-probed through the standard hwmon ABI. They are reported only when
+the board exposes corresponding channels.

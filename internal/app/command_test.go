@@ -27,7 +27,7 @@ func TestCommandJSONModesAgainstFixture(t *testing.T) {
 		{
 			name:     "snapshot",
 			args:     []string{"--root", root, "--cpu-sample", "1ns", "snapshot", "--json"},
-			contains: []string{`"cpu":`, `"memory":`, `"accelerators":`},
+			contains: []string{`"cpu":`, `"memory":`, `"accelerators":`, `"pressure":`, `"cma_total":`, `"zram":`, `"trips":`, `"cooling_devices":`, `"runtime_status":`, `"power_sensors":`, `"fans":`},
 		},
 		{
 			name:     "snapshot without processes",

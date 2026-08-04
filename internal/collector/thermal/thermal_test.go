@@ -16,7 +16,7 @@ func TestCollectorScansThermalAndHWMon(t *testing.T) {
 	if systemFS.globCalls != 0 || systemFS.metadataReads != 0 {
 		t.Fatal("collector construction eagerly discovered thermal sensors")
 	}
-	zones, warnings := collector.Collect()
+	zones, cooling, warnings := collector.Collect()
 	if len(warnings) != 0 {
 		t.Fatalf("unexpected warnings: %#v", warnings)
 	}
@@ -28,12 +28,18 @@ func TestCollectorScansThermalAndHWMon(t *testing.T) {
 			t.Fatalf("zone = %#v", zone)
 		}
 	}
-	collector.Collect()
-	if systemFS.globCalls != 3 {
-		t.Fatalf("sensor discovery glob calls = %d, want 3", systemFS.globCalls)
+	if len(zones[0].Trips) != 2 || zones[0].Trips[0].Type != "passive" {
+		t.Fatalf("trips = %#v", zones[0].Trips)
 	}
-	if systemFS.metadataReads != 3 {
-		t.Fatalf("sensor metadata reads = %d, want 3", systemFS.metadataReads)
+	if len(cooling) != 1 || cooling[0].CurrentState.Value == nil || *cooling[0].CurrentState.Value != 1 {
+		t.Fatalf("cooling = %#v", cooling)
+	}
+	collector.Collect()
+	if systemFS.globCalls != 5 {
+		t.Fatalf("sensor discovery glob calls = %d, want 5", systemFS.globCalls)
+	}
+	if systemFS.metadataReads != 6 {
+		t.Fatalf("sensor metadata reads = %d, want 6", systemFS.metadataReads)
 	}
 }
 
@@ -49,7 +55,7 @@ func (f *countingFS) Glob(pattern string) ([]string, error) {
 }
 
 func (f *countingFS) ReadFile(path string) ([]byte, error) {
-	if strings.HasSuffix(path, "/type") || strings.HasSuffix(path, "/name") || strings.HasSuffix(path, "_label") {
+	if strings.HasSuffix(path, "/type") || strings.HasSuffix(path, "/name") || strings.HasSuffix(path, "_label") || strings.HasSuffix(path, "_type") {
 		f.metadataReads++
 	}
 	return f.SystemFS.ReadFile(path)

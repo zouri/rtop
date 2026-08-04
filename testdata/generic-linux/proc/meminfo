@@ -10,3 +10,5 @@ SwapTotal:       2048000 kB
 SwapFree:        1536000 kB
 SReclaimable:     128000 kB
 Shmem:             64000 kB
+CmaTotal:          512000 kB
+CmaFree:           384000 kB

@@ -11,8 +11,9 @@ const (
 	CollectAccelerators
 	CollectProcesses
 	CollectThermals
+	CollectPower
 
-	CollectOverview = CollectCPU | CollectMemory | CollectAccelerators | CollectThermals
+	CollectOverview = CollectCPU | CollectMemory | CollectAccelerators | CollectThermals | CollectPower
 	CollectAll      = CollectOverview | CollectProcesses
 )
 
@@ -62,6 +63,34 @@ func MissingMetric(status MetricStatus, unit, source, message string, timestamp 
 	}
 }
 
+// TextMetric is the status-aware representation for textual runtime values
+// such as governors and runtime power states.
+type TextMetric struct {
+	Value     *string      `json:"value,omitempty"`
+	Timestamp time.Time    `json:"timestamp"`
+	Source    string       `json:"source,omitempty"`
+	Status    MetricStatus `json:"status"`
+	Error     string       `json:"error,omitempty"`
+}
+
+func AvailableTextMetric(value, source string, timestamp time.Time) TextMetric {
+	return TextMetric{
+		Value:     &value,
+		Timestamp: timestamp,
+		Source:    source,
+		Status:    Available,
+	}
+}
+
+func MissingTextMetric(status MetricStatus, source, message string, timestamp time.Time) TextMetric {
+	return TextMetric{
+		Timestamp: timestamp,
+		Source:    source,
+		Status:    status,
+		Error:     message,
+	}
+}
+
 type SystemInfo struct {
 	Hostname   string       `json:"hostname,omitempty"`
 	OS         string       `json:"os,omitempty"`
@@ -81,10 +110,11 @@ type DriverInfo struct {
 }
 
 type CPUCore struct {
-	ID        int    `json:"id"`
-	Cluster   string `json:"cluster,omitempty"`
-	Usage     Metric `json:"usage"`
-	Frequency Metric `json:"frequency"`
+	ID        int              `json:"id"`
+	Cluster   string           `json:"cluster,omitempty"`
+	Usage     Metric           `json:"usage"`
+	Frequency Metric           `json:"frequency"`
+	Policy    *FrequencyPolicy `json:"policy,omitempty"`
 }
 
 type CPUInfo struct {
@@ -93,11 +123,54 @@ type CPUInfo struct {
 }
 
 type MemoryInfo struct {
-	Total     Metric `json:"total"`
-	Used      Metric `json:"used"`
-	Available Metric `json:"available"`
-	SwapTotal Metric `json:"swap_total"`
-	SwapUsed  Metric `json:"swap_used"`
+	Total     Metric       `json:"total"`
+	Used      Metric       `json:"used"`
+	Available Metric       `json:"available"`
+	SwapTotal Metric       `json:"swap_total"`
+	SwapUsed  Metric       `json:"swap_used"`
+	CMATotal  Metric       `json:"cma_total"`
+	CMAUsed   Metric       `json:"cma_used"`
+	CMAFree   Metric       `json:"cma_free"`
+	Pressure  PressureInfo `json:"pressure"`
+	ZRAM      []ZRAMDevice `json:"zram"`
+}
+
+// FrequencyPolicy describes the active software limits and the immutable
+// hardware range for a CPU or devfreq performance domain.
+type FrequencyPolicy struct {
+	Minimum         Metric     `json:"minimum"`
+	Maximum         Metric     `json:"maximum"`
+	HardwareMinimum Metric     `json:"hardware_minimum"`
+	HardwareMaximum Metric     `json:"hardware_maximum"`
+	Governor        TextMetric `json:"governor"`
+}
+
+type PressureInfo struct {
+	CPU    PressureResource `json:"cpu"`
+	Memory PressureResource `json:"memory"`
+	IO     PressureResource `json:"io"`
+}
+
+type PressureResource struct {
+	Some PressureWindow `json:"some"`
+	Full PressureWindow `json:"full"`
+}
+
+type PressureWindow struct {
+	Avg10  Metric `json:"avg10"`
+	Avg60  Metric `json:"avg60"`
+	Avg300 Metric `json:"avg300"`
+	Total  Metric `json:"total"`
+}
+
+type ZRAMDevice struct {
+	Name             string     `json:"name"`
+	DiskSize         Metric     `json:"disk_size"`
+	OriginalData     Metric     `json:"original_data"`
+	CompressedData   Metric     `json:"compressed_data"`
+	MemoryUsed       Metric     `json:"memory_used"`
+	CompressionRatio Metric     `json:"compression_ratio"`
+	Algorithm        TextMetric `json:"algorithm"`
 }
 
 type LoadInfo struct {
@@ -109,17 +182,50 @@ type LoadInfo struct {
 }
 
 type ThermalZone struct {
-	Name        string `json:"name"`
+	Name        string        `json:"name"`
+	Type        string        `json:"type,omitempty"`
+	Temperature Metric        `json:"temperature"`
+	Trips       []ThermalTrip `json:"trips,omitempty"`
+}
+
+type ThermalTrip struct {
+	ID          int    `json:"id"`
 	Type        string `json:"type,omitempty"`
 	Temperature Metric `json:"temperature"`
+	Hysteresis  Metric `json:"hysteresis"`
+}
+
+type CoolingDevice struct {
+	Name         string `json:"name"`
+	Type         string `json:"type,omitempty"`
+	CurrentState Metric `json:"current_state"`
+	MaximumState Metric `json:"maximum_state"`
+}
+
+type PowerSensor struct {
+	Name  string `json:"name"`
+	Chip  string `json:"chip,omitempty"`
+	Kind  string `json:"kind"`
+	Value Metric `json:"value"`
+}
+
+type FanInfo struct {
+	Name        string     `json:"name"`
+	Chip        string     `json:"chip,omitempty"`
+	Speed       Metric     `json:"speed"`
+	TargetSpeed Metric     `json:"target_speed"`
+	PWM         Metric     `json:"pwm"`
+	ControlMode TextMetric `json:"control_mode"`
 }
 
 type Accelerator struct {
-	Name      string            `json:"name"`
-	Type      string            `json:"type"`
-	Usage     Metric            `json:"usage"`
-	Frequency Metric            `json:"frequency"`
-	Cores     []AcceleratorCore `json:"cores,omitempty"`
+	Name          string            `json:"name"`
+	Type          string            `json:"type"`
+	Usage         Metric            `json:"usage"`
+	Frequency     Metric            `json:"frequency"`
+	Policy        *FrequencyPolicy  `json:"policy,omitempty"`
+	RuntimeStatus TextMetric        `json:"runtime_status"`
+	Cores         []AcceleratorCore `json:"cores,omitempty"`
 }
 
 type AcceleratorCore struct {
@@ -151,6 +257,9 @@ type Snapshot struct {
 	Memory       MemoryInfo      `json:"memory"`
 	Load         LoadInfo        `json:"load"`
 	Thermals     []ThermalZone   `json:"thermals"`
+	Cooling      []CoolingDevice `json:"cooling_devices"`
+	Power        []PowerSensor   `json:"power_sensors"`
+	Fans         []FanInfo       `json:"fans"`
 	Accelerators []Accelerator   `json:"accelerators"`
 	Processes    []ProcessInfo   `json:"processes"`
 	Warnings     []Warning       `json:"warnings"`

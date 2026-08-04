@@ -9,6 +9,7 @@ import (
 	"rtop/internal/collector/accelerator"
 	"rtop/internal/collector/cpu"
 	"rtop/internal/collector/memory"
+	"rtop/internal/collector/power"
 	processcollector "rtop/internal/collector/process"
 	"rtop/internal/collector/thermal"
 	"rtop/internal/model"
@@ -24,6 +25,7 @@ type Monitor struct {
 	memory         *memory.Collector
 	process        *processcollector.Collector
 	thermal        *thermal.Collector
+	power          *power.Collector
 
 	processInterval time.Duration
 	thermalInterval time.Duration
@@ -42,6 +44,7 @@ type Monitor struct {
 	thermalCached      bool
 	thermalCollectedAt time.Time
 	thermals           []model.ThermalZone
+	cooling            []model.CoolingDevice
 	thermalWarnings    []model.Warning
 }
 
@@ -67,6 +70,7 @@ func NewMonitorWithIntervals(
 		memory:          memory.NewCollector(systemFS),
 		process:         processcollector.NewCollector(systemFS, cpuSampleDuration),
 		thermal:         thermal.NewCollector(systemFS),
+		power:           power.NewCollector(systemFS),
 		processInterval: processInterval,
 		thermalInterval: thermalInterval,
 		now:             time.Now,
@@ -87,9 +91,12 @@ func (m *Monitor) Snapshot(ctx context.Context) model.Snapshot {
 	var memoryInfo model.MemoryInfo
 	var loadInfo model.LoadInfo
 	zones := []model.ThermalZone{}
+	cooling := []model.CoolingDevice{}
 	processes := []model.ProcessInfo{}
 	accelerators := []model.Accelerator{}
-	var cpuWarnings, memoryWarnings, thermalWarnings, processWarnings, acceleratorWarnings []model.Warning
+	powerSensors := []model.PowerSensor{}
+	fans := []model.FanInfo{}
+	var cpuWarnings, memoryWarnings, thermalWarnings, processWarnings, acceleratorWarnings, powerWarnings []model.Warning
 	var wait sync.WaitGroup
 	collectProcess := scope.Includes(model.CollectProcesses) && !m.processDisabled.Load()
 	collectorCount := 0
@@ -108,6 +115,9 @@ func (m *Monitor) Snapshot(ctx context.Context) model.Snapshot {
 	if scope.Includes(model.CollectAccelerators) {
 		collectorCount++
 	}
+	if scope.Includes(model.CollectPower) {
+		collectorCount++
+	}
 	wait.Add(collectorCount)
 	if scope.Includes(model.CollectCPU) {
 		go func() {
@@ -124,7 +134,7 @@ func (m *Monitor) Snapshot(ctx context.Context) model.Snapshot {
 	if scope.Includes(model.CollectThermals) {
 		go func() {
 			defer wait.Done()
-			zones, thermalWarnings = m.collectThermals(timestamp, forceSlow)
+			zones, cooling, thermalWarnings = m.collectThermals(timestamp, forceSlow)
 		}()
 	}
 	if collectProcess {
@@ -139,6 +149,12 @@ func (m *Monitor) Snapshot(ctx context.Context) model.Snapshot {
 			accelerators, acceleratorWarnings = m.accelerator.Collect()
 		}()
 	}
+	if scope.Includes(model.CollectPower) {
+		go func() {
+			defer wait.Done()
+			powerSensors, fans, powerWarnings = m.power.Collect()
+		}()
+	}
 	wait.Wait()
 
 	warnings := append([]model.Warning{}, m.systemWarnings...)
@@ -147,6 +163,7 @@ func (m *Monitor) Snapshot(ctx context.Context) model.Snapshot {
 	warnings = append(warnings, thermalWarnings...)
 	warnings = append(warnings, processWarnings...)
 	warnings = append(warnings, acceleratorWarnings...)
+	warnings = append(warnings, powerWarnings...)
 
 	return model.Snapshot{
 		Collected:    scope,
@@ -156,7 +173,10 @@ func (m *Monitor) Snapshot(ctx context.Context) model.Snapshot {
 		Memory:       memoryInfo,
 		Load:         loadInfo,
 		Thermals:     zones,
+		Cooling:      cooling,
 		Accelerators: accelerators,
+		Power:        powerSensors,
+		Fans:         fans,
 		Processes:    processes,
 		Warnings:     warnings,
 	}
@@ -212,16 +232,16 @@ func (m *Monitor) collectProcesses(
 
 func (m *Monitor) collectThermals(
 	timestamp time.Time, force bool,
-) ([]model.ThermalZone, []model.Warning) {
+) ([]model.ThermalZone, []model.CoolingDevice, []model.Warning) {
 	m.thermalMu.Lock()
 	defer m.thermalMu.Unlock()
 	if !force && m.thermalCached && !collectionDue(timestamp, m.thermalCollectedAt, m.thermalInterval) {
-		return m.thermals, m.thermalWarnings
+		return m.thermals, m.cooling, m.thermalWarnings
 	}
-	m.thermals, m.thermalWarnings = m.thermal.Collect()
+	m.thermals, m.cooling, m.thermalWarnings = m.thermal.Collect()
 	m.thermalCollectedAt = timestamp
 	m.thermalCached = true
-	return m.thermals, m.thermalWarnings
+	return m.thermals, m.cooling, m.thermalWarnings
 }
 
 func collectionDue(now, previous time.Time, interval time.Duration) bool {

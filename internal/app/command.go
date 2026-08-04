@@ -328,22 +328,77 @@ func printSnapshot(writer io.Writer, snapshot model.Snapshot) {
 		fmt.Fprintf(writer, "  cpu%d %s %s", core.ID, formatMetric(core.Usage, 1), formatMetric(core.Frequency, 0))
 	}
 	fmt.Fprintln(writer)
+	for _, core := range snapshot.CPU.Cores {
+		if policy := formatFrequencyPolicy(core.Policy); policy != "" {
+			fmt.Fprintf(writer, "  cpu%d policy: %s\n", core.ID, policy)
+		}
+	}
 	fmt.Fprintf(writer, "Memory: %s used / %s total  Swap: %s used\n",
 		formatMetric(snapshot.Memory.Used, 0),
 		formatMetric(snapshot.Memory.Total, 0),
 		formatMetric(snapshot.Memory.SwapUsed, 0),
 	)
+	if snapshot.Memory.CMATotal.Status == model.Available {
+		fmt.Fprintf(writer, "CMA: %s used / %s total\n",
+			formatMetric(snapshot.Memory.CMAUsed, 0), formatMetric(snapshot.Memory.CMATotal, 0))
+	}
+	fmt.Fprintf(writer, "Pressure avg10: CPU %s  Memory %s/%s  IO %s/%s (some/full)\n",
+		formatMetric(snapshot.Memory.Pressure.CPU.Some.Avg10, 2),
+		formatMetric(snapshot.Memory.Pressure.Memory.Some.Avg10, 2),
+		formatMetric(snapshot.Memory.Pressure.Memory.Full.Avg10, 2),
+		formatMetric(snapshot.Memory.Pressure.IO.Some.Avg10, 2),
+		formatMetric(snapshot.Memory.Pressure.IO.Full.Avg10, 2),
+	)
+	for _, device := range snapshot.Memory.ZRAM {
+		fmt.Fprintf(writer, "ZRAM %s: %s used / %s, ratio %s, algorithm %s\n",
+			device.Name, formatMetric(device.MemoryUsed, 0), formatMetric(device.DiskSize, 0),
+			formatMetric(device.CompressionRatio, 2), formatTextMetric(device.Algorithm))
+	}
 	fmt.Fprintf(writer, "Load: %s %s %s\n",
 		formatMetric(snapshot.Load.OneMinute, 2),
 		formatMetric(snapshot.Load.FiveMinutes, 2),
 		formatMetric(snapshot.Load.FifteenMinutes, 2),
 	)
+	for _, accelerator := range snapshot.Accelerators {
+		fmt.Fprintf(writer, "%s: load %s  frequency %s", accelerator.Name,
+			formatMetric(accelerator.Usage, 1), formatMetric(accelerator.Frequency, 0))
+		if runtime := formatTextMetricValue(accelerator.RuntimeStatus); runtime != "" {
+			fmt.Fprintf(writer, "  power %s", runtime)
+		}
+		fmt.Fprintln(writer)
+		if policy := formatFrequencyPolicy(accelerator.Policy); policy != "" {
+			fmt.Fprintf(writer, "  policy: %s\n", policy)
+		}
+	}
+	for _, sensor := range snapshot.Power {
+		name := sensor.Name
+		if sensor.Chip != "" {
+			name = sensor.Chip + "/" + sensor.Name
+		}
+		fmt.Fprintf(writer, "Power %s (%s): %s\n", name, sensor.Kind, formatMetric(sensor.Value, 3))
+	}
+	for _, fan := range snapshot.Fans {
+		name := fan.Name
+		if fan.Chip != "" {
+			name = fan.Chip + "/" + fan.Name
+		}
+		fmt.Fprintf(writer, "Fan %s: %s, target %s, PWM %s, mode %s\n", name,
+			formatMetric(fan.Speed, 0), formatMetric(fan.TargetSpeed, 0),
+			formatMetric(fan.PWM, 1), formatTextMetric(fan.ControlMode))
+	}
 	if len(snapshot.Thermals) > 0 {
 		fmt.Fprint(writer, "Thermal:")
 		for _, zone := range snapshot.Thermals {
 			fmt.Fprintf(writer, "  %s %s", zone.Name, formatMetric(zone.Temperature, 1))
+			if trip := firstThermalTrip(zone); trip != nil {
+				fmt.Fprintf(writer, " next=%s:%s", fallback(trip.Type, "trip"), formatMetric(trip.Temperature, 0))
+			}
 		}
 		fmt.Fprintln(writer)
+	}
+	for _, device := range snapshot.Cooling {
+		fmt.Fprintf(writer, "Cooling %s: state %s / %s\n", fallback(device.Type, device.Name),
+			formatMetricNumber(device.CurrentState, 0), formatMetricNumber(device.MaximumState, 0))
 	}
 	for _, warning := range snapshot.Warnings {
 		fmt.Fprintf(writer, "warning: %s: %s\n", warning.Component, warning.Message)
@@ -359,6 +414,82 @@ func formatMetric(metric model.Metric, precision int) string {
 		return "[unavailable]"
 	}
 	return strconv.FormatFloat(value, 'f', precision, 64) + metric.Unit
+}
+
+func formatMetricNumber(metric model.Metric, precision int) string {
+	if metric.Status != model.Available || metric.Value == nil {
+		return "[" + string(metric.Status) + "]"
+	}
+	value := *metric.Value
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return "[unavailable]"
+	}
+	return strconv.FormatFloat(value, 'f', precision, 64)
+}
+
+func formatTextMetric(metric model.TextMetric) string {
+	if metric.Status != model.Available || metric.Value == nil {
+		return "[" + string(metric.Status) + "]"
+	}
+	return *metric.Value
+}
+
+func formatTextMetricValue(metric model.TextMetric) string {
+	if metric.Status != model.Available || metric.Value == nil {
+		return ""
+	}
+	return *metric.Value
+}
+
+func formatFrequencyPolicy(policy *model.FrequencyPolicy) string {
+	if policy == nil {
+		return ""
+	}
+	parts := make([]string, 0, 3)
+	if minimum, maximum := metricValue(policy.Minimum), metricValue(policy.Maximum); minimum >= 0 || maximum >= 0 {
+		parts = append(parts, formatFrequencyRange(minimum, maximum))
+	}
+	if minimum, maximum := metricValue(policy.HardwareMinimum), metricValue(policy.HardwareMaximum); minimum >= 0 || maximum >= 0 {
+		parts = append(parts, "hardware "+formatFrequencyRange(minimum, maximum))
+	}
+	if governor := formatTextMetricValue(policy.Governor); governor != "" {
+		parts = append(parts, "governor "+governor)
+	}
+	return strings.Join(parts, ", ")
+}
+
+func formatFrequencyRange(minimum, maximum float64) string {
+	switch {
+	case minimum >= 0 && maximum >= 0:
+		return fmt.Sprintf("%.0f-%.0fMHz", minimum, maximum)
+	case maximum >= 0:
+		return fmt.Sprintf("max %.0fMHz", maximum)
+	default:
+		return fmt.Sprintf("min %.0fMHz", minimum)
+	}
+}
+
+func metricValue(metric model.Metric) float64 {
+	if metric.Status != model.Available || metric.Value == nil ||
+		math.IsNaN(*metric.Value) || math.IsInf(*metric.Value, 0) {
+		return -1
+	}
+	return *metric.Value
+}
+
+func firstThermalTrip(zone model.ThermalZone) *model.ThermalTrip {
+	selected := -1
+	selectedTemperature := -1.0
+	for index := range zone.Trips {
+		value := metricValue(zone.Trips[index].Temperature)
+		if value >= 0 && (selected < 0 || value < selectedTemperature) {
+			selected, selectedTemperature = index, value
+		}
+	}
+	if selected < 0 {
+		return nil
+	}
+	return &zone.Trips[selected]
 }
 
 func fallback(value, replacement string) string {

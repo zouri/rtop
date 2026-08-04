@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -92,11 +93,25 @@ func Usage(previous, current Times) (float64, error) {
 type Collector struct {
 	fs             sysfs.SystemFS
 	sampleDuration time.Duration
-	frequencyPaths map[int]string
+	topology       map[int]frequencyTopology
 	clusters       map[int]string
 	topologyOnce   sync.Once
 	mu             sync.Mutex
 	previous       map[string]Times
+}
+
+type frequencyTopology struct {
+	currentPath     string
+	basePath        string
+	hardwareMinimum staticFrequency
+	hardwareMaximum staticFrequency
+}
+
+type staticFrequency struct {
+	value   *float64
+	status  model.MetricStatus
+	source  string
+	message string
 }
 
 func NewCollector(systemFS sysfs.SystemFS, sampleDuration time.Duration) *Collector {
@@ -180,7 +195,6 @@ func (c *Collector) Collect(ctx context.Context) (model.CPUInfo, []model.Warning
 		Overall: usageMetric(previous["cpu"], current["cpu"], timestamp),
 	}
 	c.ensureTopology()
-	frequencies := c.readFrequencies(timestamp)
 	coreNames := make([]string, 0, len(current))
 	for name := range current {
 		if isCPUCore(name) {
@@ -196,22 +210,27 @@ func (c *Collector) Collect(ctx context.Context) (model.CPUInfo, []model.Warning
 		if previousTimes, ok := previous[name]; ok {
 			usage = usageMetric(previousTimes, current[name], timestamp)
 		}
-		frequency, ok := frequencies[id]
-		if !ok {
+		topology, ok := c.topology[id]
+		frequency := model.Metric{}
+		var policy *model.FrequencyPolicy
+		if ok {
+			frequency = c.readFrequency(topology.currentPath, timestamp)
+			policy = c.readPolicy(topology, timestamp)
+		} else {
 			frequency = model.MissingMetric(model.Unsupported, "MHz", cpuFreqBase(id), "cpufreq is not exposed", timestamp)
 		}
 		info.Cores = append(info.Cores, model.CPUCore{
-			ID: id, Cluster: c.clusters[id], Usage: usage, Frequency: frequency,
+			ID: id, Cluster: c.clusters[id], Usage: usage, Frequency: frequency, Policy: policy,
 		})
 	}
 	return info, nil
 }
 
 func (c *Collector) ensureTopology() {
-	// Frequency paths, maximum frequencies and cluster membership are topology
-	// metadata; only the current frequency value needs sampling every refresh.
+	// Frequency paths, hardware limits and cluster membership are topology
+	// metadata. Current frequency, software limits and governor remain dynamic.
 	c.topologyOnce.Do(func() {
-		c.frequencyPaths, c.clusters = discoverFrequencyTopology(c.fs)
+		c.topology, c.clusters = discoverFrequencyTopology(c.fs)
 	})
 }
 
@@ -225,7 +244,7 @@ func (c *Collector) unavailableCPU(timestamp time.Time, err error) model.CPUInfo
 	}
 }
 
-func discoverFrequencyTopology(systemFS sysfs.SystemFS) (map[int]string, map[int]string) {
+func discoverFrequencyTopology(systemFS sysfs.SystemFS) (map[int]frequencyTopology, map[int]string) {
 	frequencyPaths := make(map[int]string)
 	fallback, _ := systemFS.Glob("/sys/devices/system/cpu/cpu[0-9]*/cpufreq/cpuinfo_cur_freq")
 	for _, path := range fallback {
@@ -240,31 +259,51 @@ func discoverFrequencyTopology(systemFS sysfs.SystemFS) (map[int]string, map[int
 		}
 	}
 
-	maximums := make(map[int]float64)
-	maxPaths, _ := systemFS.Glob("/sys/devices/system/cpu/cpu[0-9]*/cpufreq/cpuinfo_max_freq")
-	for _, path := range maxPaths {
-		id, ok := coreIDFromPath(path)
-		if !ok {
-			continue
+	topology := make(map[int]frequencyTopology, len(frequencyPaths))
+	maximums := make(map[int]float64, len(frequencyPaths))
+	for id, currentPath := range frequencyPaths {
+		basePath := filepath.Dir(currentPath)
+		hardwareMinimum := readStaticFrequency(systemFS, filepath.Join(basePath, "cpuinfo_min_freq"), 1000)
+		hardwareMaximum := readStaticFrequency(systemFS, filepath.Join(basePath, "cpuinfo_max_freq"), 1000)
+		topology[id] = frequencyTopology{
+			currentPath: currentPath, basePath: basePath,
+			hardwareMinimum: hardwareMinimum, hardwareMaximum: hardwareMaximum,
 		}
-		data, err := systemFS.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		value, err := strconv.ParseFloat(strings.TrimSpace(string(data)), 64)
-		if err == nil {
-			maximums[id] = value
+		if hardwareMaximum.status == model.Available && hardwareMaximum.value != nil {
+			maximums[id] = *hardwareMaximum.value
 		}
 	}
-	return frequencyPaths, classifyClusters(maximums)
+	return topology, classifyClusters(maximums)
 }
 
-func (c *Collector) readFrequencies(timestamp time.Time) map[int]model.Metric {
-	result := make(map[int]model.Metric)
-	for id, path := range c.frequencyPaths {
-		result[id] = c.readFrequency(path, timestamp)
+func readStaticFrequency(systemFS sysfs.SystemFS, path string, divisor float64) staticFrequency {
+	data, err := systemFS.ReadFile(path)
+	if err != nil {
+		return staticFrequency{status: sysfs.StatusForError(err), source: path, message: err.Error()}
 	}
-	return result
+	value, err := strconv.ParseFloat(strings.TrimSpace(string(data)), 64)
+	if err != nil {
+		return staticFrequency{status: model.Unavailable, source: path, message: err.Error()}
+	}
+	value /= divisor
+	return staticFrequency{value: &value, status: model.Available, source: path}
+}
+
+func (value staticFrequency) metric(timestamp time.Time) model.Metric {
+	if value.status == model.Available && value.value != nil {
+		return model.AvailableMetric(*value.value, "MHz", value.source, timestamp)
+	}
+	return model.MissingMetric(value.status, "MHz", value.source, value.message, timestamp)
+}
+
+func (c *Collector) readPolicy(topology frequencyTopology, timestamp time.Time) *model.FrequencyPolicy {
+	return &model.FrequencyPolicy{
+		Minimum:         c.readFrequency(filepath.Join(topology.basePath, "scaling_min_freq"), timestamp),
+		Maximum:         c.readFrequency(filepath.Join(topology.basePath, "scaling_max_freq"), timestamp),
+		HardwareMinimum: topology.hardwareMinimum.metric(timestamp),
+		HardwareMaximum: topology.hardwareMaximum.metric(timestamp),
+		Governor:        c.readTextMetric(filepath.Join(topology.basePath, "scaling_governor"), timestamp),
+	}
 }
 
 func (c *Collector) readFrequency(path string, timestamp time.Time) model.Metric {
@@ -277,6 +316,18 @@ func (c *Collector) readFrequency(path string, timestamp time.Time) model.Metric
 		return model.MissingMetric(model.Unavailable, "MHz", path, err.Error(), timestamp)
 	}
 	return model.AvailableMetric(value/1000, "MHz", path, timestamp)
+}
+
+func (c *Collector) readTextMetric(path string, timestamp time.Time) model.TextMetric {
+	data, err := c.fs.ReadFile(path)
+	if err != nil {
+		return model.MissingTextMetric(sysfs.StatusForError(err), path, err.Error(), timestamp)
+	}
+	value := strings.TrimSpace(string(data))
+	if value == "" {
+		return model.MissingTextMetric(model.Unavailable, path, "empty text value", timestamp)
+	}
+	return model.AvailableTextMetric(value, path, timestamp)
 }
 
 func usageMetric(previous, current Times, timestamp time.Time) model.Metric {

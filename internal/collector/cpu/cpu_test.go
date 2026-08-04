@@ -76,6 +76,11 @@ func TestCollectorUsesTwoSamplesAndReadsFrequency(t *testing.T) {
 	if info.Cores[1].Frequency.Value == nil || *info.Cores[1].Frequency.Value != 2208 {
 		t.Fatalf("frequency = %#v", info.Cores[1].Frequency)
 	}
+	if info.Cores[1].Policy == nil || info.Cores[1].Policy.Maximum.Value == nil ||
+		*info.Cores[1].Policy.Maximum.Value != 2208 || info.Cores[1].Policy.Governor.Value == nil ||
+		*info.Cores[1].Policy.Governor.Value != "schedutil" {
+		t.Fatalf("policy = %#v", info.Cores[1].Policy)
+	}
 	if systemFS.statReads != 2 {
 		t.Fatalf("first collection read %s %d times, want 2", procStatPath, systemFS.statReads)
 	}
@@ -99,15 +104,15 @@ func TestCollectorCachesFrequencyTopology(t *testing.T) {
 	}
 
 	collector.Collect(context.Background())
-	if systemFS.globCalls != 3 {
-		t.Fatalf("topology discovery glob calls = %d, want 3", systemFS.globCalls)
+	if systemFS.globCalls != 2 {
+		t.Fatalf("topology discovery glob calls = %d, want 2", systemFS.globCalls)
 	}
 	if systemFS.maxFrequencyReads != 2 {
 		t.Fatalf("maximum frequency reads = %d, want 2", systemFS.maxFrequencyReads)
 	}
 
 	collector.Collect(context.Background())
-	if systemFS.globCalls != 3 {
+	if systemFS.globCalls != 2 {
 		t.Fatalf("collection repeated topology discovery: glob calls = %d", systemFS.globCalls)
 	}
 	if systemFS.maxFrequencyReads != 2 {

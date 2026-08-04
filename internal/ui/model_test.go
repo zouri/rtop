@@ -93,9 +93,9 @@ func TestPageCollectionScopesAndNotifications(t *testing.T) {
 		want model.CollectionScope
 	}{
 		{pageAll, model.CollectAll},
-		{pageCPU, model.CollectCPU | model.CollectMemory | model.CollectThermals},
+		{pageCPU, model.CollectCPU | model.CollectMemory | model.CollectThermals | model.CollectPower},
 		{pageMemory, model.CollectMemory | model.CollectProcesses},
-		{pageEngines, model.CollectAccelerators | model.CollectThermals},
+		{pageEngines, model.CollectAccelerators | model.CollectThermals | model.CollectPower},
 		{pageProcesses, model.CollectProcesses},
 		{pageInfo, model.CollectOverview},
 	}
@@ -250,6 +250,28 @@ func TestAllPageKeepsPerCoreUsageCompact(t *testing.T) {
 	t.Fatal("ALL page is missing the compact core row")
 }
 
+func TestDetailPagesRenderDVFSPressureAndThermalControls(t *testing.T) {
+	uiModel := NewModel(make(chan model.Snapshot), nil)
+	updated, _ := uiModel.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	uiModel = updated.(Model)
+	updated, _ = uiModel.Update(snapshotMsg{snapshot: testSnapshot()})
+	uiModel = updated.(Model)
+
+	for currentPage, expected := range map[page][]string{
+		pageCPU:     {"limits", "schedutil", "board-fan"},
+		pageMemory:  {"CMA", "PSI memory", "ZRAM"},
+		pageEngines: {"power active", "simple_ondemand", "passive", "COOLING", "POWER & FANS", "board-fan"},
+	} {
+		uiModel.page = currentPage
+		view := ansi.Strip(uiModel.View())
+		for _, value := range expected {
+			if !strings.Contains(view, value) {
+				t.Fatalf("page %d is missing %q:\n%s", currentPage, value, view)
+			}
+		}
+	}
+}
+
 func testSnapshot() model.Snapshot {
 	now := time.Now()
 	return model.Snapshot{
@@ -264,6 +286,13 @@ func testSnapshot() model.Snapshot {
 				ID: 0, Cluster: "little",
 				Usage:     model.AvailableMetric(25, "%", "/proc/stat", now),
 				Frequency: model.AvailableMetric(1800, "MHz", "/sys/cpu0", now),
+				Policy: &model.FrequencyPolicy{
+					Minimum:         model.AvailableMetric(600, "MHz", "/sys/cpu0/min", now),
+					Maximum:         model.AvailableMetric(1800, "MHz", "/sys/cpu0/max", now),
+					HardwareMinimum: model.AvailableMetric(408, "MHz", "/sys/cpu0/hwmin", now),
+					HardwareMaximum: model.AvailableMetric(1800, "MHz", "/sys/cpu0/hwmax", now),
+					Governor:        model.AvailableTextMetric("schedutil", "/sys/cpu0/governor", now),
+				},
 			}},
 		},
 		Memory: model.MemoryInfo{
@@ -272,7 +301,49 @@ func testSnapshot() model.Snapshot {
 			Available: model.AvailableMetric(4000, "MiB", "/proc/meminfo", now),
 			SwapTotal: model.AvailableMetric(0, "MiB", "/proc/meminfo", now),
 			SwapUsed:  model.AvailableMetric(0, "MiB", "/proc/meminfo", now),
+			CMATotal:  model.AvailableMetric(500, "MiB", "/proc/meminfo", now),
+			CMAUsed:   model.AvailableMetric(125, "MiB", "/proc/meminfo", now),
+			CMAFree:   model.AvailableMetric(375, "MiB", "/proc/meminfo", now),
+			Pressure: model.PressureInfo{
+				CPU: model.PressureResource{Some: model.PressureWindow{Avg10: model.AvailableMetric(0.25, "%", "/proc/pressure/cpu", now)}},
+				Memory: model.PressureResource{
+					Some: model.PressureWindow{Avg10: model.AvailableMetric(1.25, "%", "/proc/pressure/memory", now)},
+					Full: model.PressureWindow{Avg10: model.AvailableMetric(0.40, "%", "/proc/pressure/memory", now)},
+				},
+				IO: model.PressureResource{
+					Some: model.PressureWindow{Avg10: model.AvailableMetric(2.50, "%", "/proc/pressure/io", now)},
+					Full: model.PressureWindow{Avg10: model.AvailableMetric(0.80, "%", "/proc/pressure/io", now)},
+				},
+			},
+			ZRAM: []model.ZRAMDevice{{
+				Name: "zram0", DiskSize: model.AvailableMetric(1024, "MiB", "/sys/block/zram0/disksize", now),
+				MemoryUsed:       model.AvailableMetric(224, "MiB", "/sys/block/zram0/mm_stat", now),
+				CompressionRatio: model.AvailableMetric(2.29, "x", "/sys/block/zram0/mm_stat", now),
+				Algorithm:        model.AvailableTextMetric("zstd", "/sys/block/zram0/comp_algorithm", now),
+			}},
 		},
+		Thermals: []model.ThermalZone{{
+			Name: "soc", Type: "cpu-thermal", Temperature: model.AvailableMetric(52, "°C", "/sys/thermal/temp", now),
+			Trips: []model.ThermalTrip{{
+				ID: 0, Type: "passive", Temperature: model.AvailableMetric(80, "°C", "/sys/thermal/trip0", now),
+			}},
+		}},
+		Cooling: []model.CoolingDevice{{
+			Name: "cooling_device0", Type: "thermal-cpufreq-0",
+			CurrentState: model.AvailableMetric(1, "state", "/sys/thermal/cooling/cur", now),
+			MaximumState: model.AvailableMetric(4, "state", "/sys/thermal/cooling/max", now),
+		}},
+		Power: []model.PowerSensor{{
+			Name: "system", Chip: "fixture-sensor", Kind: "power",
+			Value: model.AvailableMetric(9, "W", "/sys/hwmon/power1_input", now),
+		}},
+		Fans: []model.FanInfo{{
+			Name: "board-fan", Chip: "fixture-sensor",
+			Speed:       model.AvailableMetric(2400, "RPM", "/sys/hwmon/fan1_input", now),
+			TargetSpeed: model.AvailableMetric(3000, "RPM", "/sys/hwmon/fan1_target", now),
+			PWM:         model.AvailableMetric(50.2, "%", "/sys/hwmon/pwm1", now),
+			ControlMode: model.AvailableTextMetric("automatic", "/sys/hwmon/pwm1_enable", now),
+		}},
 		Processes: []model.ProcessInfo{{
 			PID: 100, Name: "fixture worker",
 			CPU:     model.AvailableMetric(12, "%", "/proc/100/stat", now),
@@ -284,6 +355,12 @@ func testSnapshot() model.Snapshot {
 				Name: "Mali GPU", Type: "gpu",
 				Usage:     model.AvailableMetric(20, "%", "/sys/gpu/load", now),
 				Frequency: model.AvailableMetric(1000, "MHz", "/sys/gpu/cur_freq", now),
+				Policy: &model.FrequencyPolicy{
+					Minimum:  model.AvailableMetric(200, "MHz", "/sys/gpu/min", now),
+					Maximum:  model.AvailableMetric(1000, "MHz", "/sys/gpu/max", now),
+					Governor: model.AvailableTextMetric("simple_ondemand", "/sys/gpu/governor", now),
+				},
+				RuntimeStatus: model.AvailableTextMetric("active", "/sys/gpu/runtime_status", now),
 			},
 			{
 				Name: "RKNPU", Type: "npu",

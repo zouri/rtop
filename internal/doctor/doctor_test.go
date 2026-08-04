@@ -31,6 +31,18 @@ func TestAnalyzeReportsSourcesAndPermissionWarnings(t *testing.T) {
 	if core.Suggestion == "" {
 		t.Fatal("permission check has no suggestion")
 	}
+	if check := findCheck(t, report, "metric.pressure.memory"); check.Status != StatusPass {
+		t.Fatalf("memory pressure check = %#v", check)
+	}
+	if check := findCheck(t, report, "metric.gpu.runtime_status"); check.Status != StatusPass || check.Message != "active" {
+		t.Fatalf("GPU runtime check = %#v", check)
+	}
+	if check := findCheck(t, report, "metric.power.sensor0"); check.Status != StatusPass {
+		t.Fatalf("power sensor check = %#v", check)
+	}
+	if check := findCheck(t, report, "metric.fan.device0.control_mode"); check.Status != StatusPass || check.Message != "automatic" {
+		t.Fatalf("fan mode check = %#v", check)
+	}
 }
 
 func TestAnalyzeReportsDebugFSDirectoryPermission(t *testing.T) {
@@ -98,15 +110,40 @@ func completeSnapshot() model.Snapshot {
 				{Type: "ddr", Name: "rockchip-dmc", Device: "dmc", Governor: "dmc_ondemand"},
 			},
 		},
-		CPU:    model.CPUInfo{Overall: available(10, "%", "/proc/stat")},
-		Memory: model.MemoryInfo{Total: available(8000, "MiB", "/proc/meminfo")},
-		Load:   model.LoadInfo{OneMinute: available(1, "", "/proc/loadavg")},
+		CPU: model.CPUInfo{Overall: available(10, "%", "/proc/stat")},
+		Memory: model.MemoryInfo{
+			Total:    available(8000, "MiB", "/proc/meminfo"),
+			CMATotal: available(512, "MiB", "/proc/meminfo"),
+			Pressure: model.PressureInfo{Memory: model.PressureResource{
+				Some: model.PressureWindow{Avg10: available(1.25, "%", "/proc/pressure/memory")},
+			}},
+		},
+		Load: model.LoadInfo{OneMinute: available(1, "", "/proc/loadavg")},
 		Thermals: []model.ThermalZone{{
 			Name: "soc", Temperature: available(40, "°C", "/sys/class/thermal/thermal_zone0/temp"),
+			Trips: []model.ThermalTrip{{
+				ID: 0, Type: "passive", Temperature: available(80, "°C", "/sys/class/thermal/thermal_zone0/trip_point_0_temp"),
+			}},
+		}},
+		Cooling: []model.CoolingDevice{{
+			Name: "cooling_device0", Type: "thermal-cpufreq-0",
+			CurrentState: available(1, "state", "/sys/class/thermal/cooling_device0/cur_state"),
+			MaximumState: available(4, "state", "/sys/class/thermal/cooling_device0/max_state"),
+		}},
+		Power: []model.PowerSensor{{
+			Name: "system", Chip: "ina3221", Kind: "power",
+			Value: available(9, "W", "/sys/class/hwmon/hwmon0/power1_input"),
+		}},
+		Fans: []model.FanInfo{{
+			Name: "board-fan", Chip: "pwm-fan",
+			Speed:       available(2400, "RPM", "/sys/class/hwmon/hwmon1/fan1_input"),
+			TargetSpeed: available(3000, "RPM", "/sys/class/hwmon/hwmon1/fan1_target"),
+			PWM:         available(50, "%", "/sys/class/hwmon/hwmon1/pwm1"),
+			ControlMode: model.AvailableTextMetric("automatic", "/sys/class/hwmon/hwmon1/pwm1_enable", now),
 		}},
 		Processes: []model.ProcessInfo{{PID: 1, Name: "init"}},
 		Accelerators: []model.Accelerator{
-			{Name: "Mali GPU", Type: "gpu", Usage: available(20, "%", "/sys/gpu/load"), Frequency: available(1000, "MHz", "/sys/gpu/cur_freq")},
+			{Name: "Mali GPU", Type: "gpu", Usage: available(20, "%", "/sys/gpu/load"), Frequency: available(1000, "MHz", "/sys/gpu/cur_freq"), RuntimeStatus: model.AvailableTextMetric("active", "/sys/gpu/runtime_status", now)},
 			{
 				Name: "RKNPU", Type: "npu", Usage: available(30, "%", "/sys/npu/load"), Frequency: available(900, "MHz", "/sys/npu/cur_freq"),
 				Cores: []model.AcceleratorCore{{

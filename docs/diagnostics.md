@@ -8,7 +8,12 @@
 - debugfs mounting and current-user access.
 - CPU, memory, load, thermal and process sources.
 - GPU, NPU and DDR load/frequency sources.
+- CPU and devfreq minimum/maximum frequency and governor sources.
+- Accelerator runtime power-state sources.
 - Per-core RKNPU load status.
+- CMA accounting and PSI memory-pressure availability.
+- Thermal trip-point and cooling-device discovery.
+- hwmon voltage, current, power, energy and fan/PWM sources.
 
 Use JSON output when attaching a report to an issue:
 

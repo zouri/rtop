@@ -31,6 +31,12 @@ func TestMonitorKeepsOtherCollectorsWhenCPUFails(t *testing.T) {
 	if len(snapshot.Thermals) != 2 {
 		t.Fatalf("thermal zones = %d", len(snapshot.Thermals))
 	}
+	if len(snapshot.Cooling) != 1 {
+		t.Fatalf("cooling devices = %d", len(snapshot.Cooling))
+	}
+	if len(snapshot.Power) != 4 || len(snapshot.Fans) != 1 {
+		t.Fatalf("power sensors=%d fans=%d", len(snapshot.Power), len(snapshot.Fans))
+	}
 	if len(snapshot.Warnings) == 0 {
 		t.Fatal("expected a CPU warning")
 	}
@@ -136,8 +142,18 @@ func TestMonitorRunsOnlyCollectorsInScope(t *testing.T) {
 	if memorySnapshot.Memory.Total.Status != model.Available {
 		t.Fatalf("memory status = %q", memorySnapshot.Memory.Total.Status)
 	}
-	if reads, globs := systemFS.totals(); reads != 2 || globs != 0 {
+	if reads, globs := systemFS.totals(); reads != 8 || globs != 1 {
 		t.Fatalf("memory scope performed ReadFile=%d Glob=%d", reads, globs)
+	}
+
+	monitor.SetCollectionScope(model.CollectPower)
+	systemFS.reset()
+	powerSnapshot := monitor.Snapshot(context.Background())
+	if len(powerSnapshot.Power) != 4 || len(powerSnapshot.Fans) != 1 {
+		t.Fatalf("power scope sensors=%d fans=%d", len(powerSnapshot.Power), len(powerSnapshot.Fans))
+	}
+	if systemFS.readCount("/proc/meminfo") != 0 || systemFS.thermalReads() != 0 {
+		t.Fatal("power scope ran an unrelated collector")
 	}
 
 	monitor.SetCollectionScope(model.CollectProcesses)
@@ -163,7 +179,8 @@ func TestMonitorRunsOnlyCollectorsInScope(t *testing.T) {
 		t.Fatalf("overview scanned processes %d times", calls)
 	}
 	if overviewSnapshot.CPU.Overall.Status == "" || overviewSnapshot.Memory.Total.Status == "" ||
-		len(overviewSnapshot.Accelerators) == 0 || len(overviewSnapshot.Thermals) == 0 {
+		len(overviewSnapshot.Accelerators) == 0 || len(overviewSnapshot.Thermals) == 0 ||
+		len(overviewSnapshot.Power) == 0 || len(overviewSnapshot.Fans) == 0 {
 		t.Fatalf("overview snapshot is incomplete: %#v", overviewSnapshot)
 	}
 

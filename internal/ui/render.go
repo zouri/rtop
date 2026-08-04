@@ -235,6 +235,9 @@ func (m Model) cpuCard(width int) string {
 			builder.WriteString(fmt.Sprintf("%-13s %7s  %8s", label, formatMetricCompact(core.Usage, 1), formatMetricCompact(core.Frequency, 0)))
 			builder.WriteString("\n  " + progress(core.Usage, max(8, inner-2)))
 		}
+		if summary := frequencyPolicySummary(core.Policy); summary != "" {
+			builder.WriteString("\n" + truncateText("  limits "+summary, inner))
+		}
 	}
 	return panel(builder.String(), width)
 }
@@ -249,6 +252,9 @@ func (m Model) memoryCardCompact(width int) string {
 	builder.WriteString(progressValue(percent, inner))
 	builder.WriteString(fmt.Sprintf("\nFree %s  Swap %s", formatMetric(m.latest.Memory.Available, 0), formatMetric(m.latest.Memory.SwapUsed, 0)))
 	builder.WriteString(fmt.Sprintf("\nLoad %s %s %s", formatMetricCompact(m.latest.Load.OneMinute, 2), formatMetricCompact(m.latest.Load.FiveMinutes, 2), formatMetricCompact(m.latest.Load.FifteenMinutes, 2)))
+	if m.latest.Memory.Pressure.Memory.Some.Avg10.Status == model.Available {
+		builder.WriteString(fmt.Sprintf("\nPSI mem %s", formatMetricCompact(m.latest.Memory.Pressure.Memory.Some.Avg10, 2)))
+	}
 	return panel(builder.String(), width)
 }
 
@@ -263,6 +269,12 @@ func (m Model) overviewEnginesCard(width int) string {
 		builder.WriteString(fmt.Sprintf("\nHot %-16s %s", truncateText(zone.Name, 16), formatTemperature(zone.Temperature)))
 	} else {
 		builder.WriteString("\n" + mutedStyle.Render("No thermal source discovered"))
+	}
+	if sensor, ok := primaryPowerSensor(m.latest.Power); ok {
+		builder.WriteString(fmt.Sprintf("\nPower %-14s %s", truncateText(sensor.Name, 14), formatMetricCompact(sensor.Value, 2)))
+	}
+	if len(m.latest.Fans) > 0 {
+		builder.WriteString(fmt.Sprintf("\nFan   %-14s %s", truncateText(m.latest.Fans[0].Name, 14), formatMetricCompact(m.latest.Fans[0].Speed, 0)))
 	}
 	if len(m.latest.Warnings) > 0 {
 		builder.WriteString("\n" + warnStyle.Render(fmt.Sprintf("%d warning(s) · open INFO", len(m.latest.Warnings))))
@@ -299,6 +311,7 @@ func (m Model) renderCPU(_ int) string {
 }
 
 func (m Model) cpuContextCard(width int) string {
+	inner := max(8, width-4)
 	var builder strings.Builder
 	builder.WriteString(titleStyle.Render("LOAD & THERMAL"))
 	builder.WriteString(fmt.Sprintf("\nLoad average  %s  %s  %s", formatMetric(m.latest.Load.OneMinute, 2), formatMetric(m.latest.Load.FiveMinutes, 2), formatMetric(m.latest.Load.FifteenMinutes, 2)))
@@ -308,8 +321,29 @@ func (m Model) cpuContextCard(width int) string {
 	} else {
 		limit := min(4, len(m.latest.Thermals))
 		for _, zone := range m.latest.Thermals[:limit] {
-			builder.WriteString(fmt.Sprintf("\n%-26s %s", truncateText(zone.Name, 26), formatTemperature(zone.Temperature)))
+			line := fmt.Sprintf("%-26s %s", truncateText(zone.Name, 26), formatTemperature(zone.Temperature))
+			if trip := thermalTripSummary(zone); trip != "" {
+				line += "  " + trip
+			}
+			builder.WriteString("\n" + truncateText(line, inner))
 		}
+	}
+	if len(m.latest.Cooling) > 0 {
+		limit := min(3, len(m.latest.Cooling))
+		for _, device := range m.latest.Cooling[:limit] {
+			line := fmt.Sprintf("Cooling %-18s %s/%s", truncateText(device.Type, 18),
+				formatCoolingState(device.CurrentState), formatMetricNumber(device.MaximumState, 0))
+			builder.WriteString("\n" + truncateText(line, inner))
+		}
+	}
+	if sensor, ok := primaryPowerSensor(m.latest.Power); ok {
+		line := fmt.Sprintf("Power   %-18s %s", truncateText(sensor.Name, 18), formatMetric(sensor.Value, 2))
+		builder.WriteString("\n" + truncateText(line, inner))
+	}
+	for _, fan := range m.latest.Fans[:min(3, len(m.latest.Fans))] {
+		line := fmt.Sprintf("Fan     %-18s %s  PWM %s %s", truncateText(fan.Name, 18),
+			formatMetric(fan.Speed, 0), formatMetricCompact(fan.PWM, 0), formatTextMetricCompact(fan.ControlMode))
+		builder.WriteString("\n" + truncateText(line, inner))
 	}
 	return panel(builder.String(), width)
 }
@@ -340,8 +374,32 @@ func (m Model) memoryDetailCard(width int) string {
 	}
 	builder.WriteString(fmt.Sprintf("\nAvailable  %s", formatMetric(m.latest.Memory.Available, 0)))
 	builder.WriteString(fmt.Sprintf("\nSwap       %s / %s", formatMetric(m.latest.Memory.SwapUsed, 0), formatMetric(m.latest.Memory.SwapTotal, 0)))
+	if m.latest.Memory.CMATotal.Status == model.Available {
+		builder.WriteString(fmt.Sprintf("\nCMA        %s used / %s total", formatMetric(m.latest.Memory.CMAUsed, 0), formatMetric(m.latest.Memory.CMATotal, 0)))
+	}
 	builder.WriteString(fmt.Sprintf("\nLoad       %s  %s  %s", formatMetric(m.latest.Load.OneMinute, 2), formatMetric(m.latest.Load.FiveMinutes, 2), formatMetric(m.latest.Load.FifteenMinutes, 2)))
 	builder.WriteString(fmt.Sprintf("\nTasks      %s / %s", formatMetricNumber(m.latest.Load.Runnable, 0), formatMetricNumber(m.latest.Load.Tasks, 0)))
+	if width >= 62 {
+		builder.WriteString(fmt.Sprintf("\nPSI avg10  CPU %s  MEM %s/%s  IO %s/%s",
+			formatMetricCompact(m.latest.Memory.Pressure.CPU.Some.Avg10, 2),
+			formatMetricCompact(m.latest.Memory.Pressure.Memory.Some.Avg10, 2),
+			formatMetricCompact(m.latest.Memory.Pressure.Memory.Full.Avg10, 2),
+			formatMetricCompact(m.latest.Memory.Pressure.IO.Some.Avg10, 2),
+			formatMetricCompact(m.latest.Memory.Pressure.IO.Full.Avg10, 2),
+		))
+	} else {
+		builder.WriteString(fmt.Sprintf("\nPSI memory %s/%s",
+			formatMetricCompact(m.latest.Memory.Pressure.Memory.Some.Avg10, 2),
+			formatMetricCompact(m.latest.Memory.Pressure.Memory.Full.Avg10, 2),
+		))
+	}
+	for _, device := range m.latest.Memory.ZRAM {
+		line := fmt.Sprintf("ZRAM %-6s %s/%s ratio %s %s", device.Name,
+			formatMetricCompact(device.MemoryUsed, 0), formatMetricCompact(device.DiskSize, 0),
+			formatMetricCompact(device.CompressionRatio, 2), formatTextMetricCompact(device.Algorithm),
+		)
+		builder.WriteString("\n" + truncateText(line, inner))
+	}
 	return panel(builder.String(), width)
 }
 
@@ -359,6 +417,8 @@ func (m Model) renderEngines(_ int) string {
 	}
 	builder.WriteString("\n")
 	builder.WriteString(m.thermalCard(m.width))
+	builder.WriteString("\n")
+	builder.WriteString(m.powerCard(m.width))
 	return builder.String()
 }
 
@@ -367,6 +427,16 @@ func enginePanel(accelerator model.Accelerator, history []float64, width int) st
 	var builder strings.Builder
 	builder.WriteString(titleStyle.Render(accelerator.Name))
 	builder.WriteString(fmt.Sprintf("  load %s  frequency %s", formatMetric(accelerator.Usage, 1), formatMetric(accelerator.Frequency, 0)))
+	metadata := make([]string, 0, 2)
+	if runtime := formatTextMetricValue(accelerator.RuntimeStatus); runtime != "" {
+		metadata = append(metadata, "power "+runtime)
+	}
+	if policy := frequencyPolicySummary(accelerator.Policy); policy != "" {
+		metadata = append(metadata, "limits "+policy)
+	}
+	if len(metadata) > 0 {
+		builder.WriteString("\n" + truncateText(strings.Join(metadata, " · "), inner))
+	}
 	if width >= 48 {
 		builder.WriteString("\n")
 		builder.WriteString(progress(accelerator.Usage, inner))
@@ -480,15 +550,60 @@ func (m Model) thermalCard(width int) string {
 	builder.WriteString(titleStyle.Render("THERMAL"))
 	if len(m.latest.Thermals) == 0 {
 		builder.WriteString("\n" + mutedStyle.Render("No thermal or hwmon sensors discovered"))
+	} else {
+		for _, zone := range m.latest.Thermals {
+			if width >= 72 {
+				line := fmt.Sprintf("%-24s %-15s %9s", truncateText(zone.Name, 24), truncateText(zone.Type, 15), formatTemperature(zone.Temperature))
+				if trip := thermalTripSummary(zone); trip != "" {
+					line += "  " + trip
+				}
+				builder.WriteString("\n" + truncateText(line, max(8, width-4)))
+			} else {
+				nameWidth := max(8, width-16)
+				builder.WriteString(fmt.Sprintf("\n%-*s %10s", nameWidth, truncateText(zone.Name, nameWidth), formatTemperature(zone.Temperature)))
+				if trip := thermalTripSummary(zone); trip != "" {
+					builder.WriteString("\n  " + truncateText(trip, max(8, width-6)))
+				}
+			}
+		}
+	}
+	if len(m.latest.Cooling) > 0 {
+		builder.WriteString("\n" + titleStyle.Render("COOLING"))
+		for _, device := range m.latest.Cooling {
+			line := fmt.Sprintf("%-24s %s / %s", truncateText(device.Type, 24),
+				formatCoolingState(device.CurrentState), formatMetricNumber(device.MaximumState, 0))
+			builder.WriteString("\n" + truncateText(line, max(8, width-4)))
+		}
+	}
+	return panel(builder.String(), width)
+}
+
+func (m Model) powerCard(width int) string {
+	inner := max(8, width-4)
+	var builder strings.Builder
+	builder.WriteString(titleStyle.Render("POWER & FANS"))
+	if len(m.latest.Power) == 0 && len(m.latest.Fans) == 0 {
+		builder.WriteString("\n" + mutedStyle.Render("No hwmon power or fan sensors discovered"))
 		return panel(builder.String(), width)
 	}
-	for _, zone := range m.latest.Thermals {
-		if width >= 72 {
-			builder.WriteString(fmt.Sprintf("\n%-28s %-18s %9s", truncateText(zone.Name, 28), truncateText(zone.Type, 18), formatTemperature(zone.Temperature)))
-		} else {
-			nameWidth := max(8, width-16)
-			builder.WriteString(fmt.Sprintf("\n%-*s %10s", nameWidth, truncateText(zone.Name, nameWidth), formatTemperature(zone.Temperature)))
+	for _, sensor := range m.latest.Power {
+		name := sensor.Name
+		if sensor.Chip != "" && width >= 64 {
+			name = sensor.Chip + "/" + sensor.Name
 		}
+		line := fmt.Sprintf("%-9s %-28s %10s", strings.ToUpper(sensor.Kind), truncateText(name, 28), formatMetric(sensor.Value, 3))
+		builder.WriteString("\n" + truncateText(line, inner))
+	}
+	for _, fan := range m.latest.Fans {
+		name := fan.Name
+		if fan.Chip != "" && width >= 64 {
+			name = fan.Chip + "/" + fan.Name
+		}
+		nameWidth := max(12, min(28, inner-46))
+		line := fmt.Sprintf("FAN       %-*s %8s  target %8s  PWM %6s  %s", nameWidth,
+			truncateText(name, nameWidth), formatMetric(fan.Speed, 0), formatMetricCompact(fan.TargetSpeed, 0),
+			formatMetricCompact(fan.PWM, 0), formatTextMetricCompact(fan.ControlMode))
+		builder.WriteString("\n" + truncateText(line, inner))
 	}
 	return panel(builder.String(), width)
 }
@@ -524,13 +639,28 @@ func (m Model) renderInfo(_ int) string {
 	builder.WriteString(titleStyle.Render("METRIC SOURCES"))
 	builder.WriteString(fmt.Sprintf("\nCPU          %s", statusText(m.latest.CPU.Overall)))
 	builder.WriteString(fmt.Sprintf("\nMemory       %s", statusText(m.latest.Memory.Total)))
+	builder.WriteString(fmt.Sprintf("\nMemory PSI   %s", statusText(m.latest.Memory.Pressure.Memory.Some.Avg10)))
+	builder.WriteString(fmt.Sprintf("\nCMA          %s", statusText(m.latest.Memory.CMATotal)))
 	thermalStatus := mutedStyle.Render("unsupported")
 	if len(m.latest.Thermals) > 0 {
 		thermalStatus = goodStyle.Render(fmt.Sprintf("available (%d)", len(m.latest.Thermals)))
 	}
 	builder.WriteString("\nThermal      " + thermalStatus)
+	powerStatus := mutedStyle.Render("unsupported")
+	if len(m.latest.Power) > 0 {
+		powerStatus = goodStyle.Render(fmt.Sprintf("available (%d)", len(m.latest.Power)))
+	}
+	builder.WriteString("\nPower        " + powerStatus)
+	fanStatus := mutedStyle.Render("unsupported")
+	if len(m.latest.Fans) > 0 {
+		fanStatus = goodStyle.Render(fmt.Sprintf("available (%d)", len(m.latest.Fans)))
+	}
+	builder.WriteString("\nFans         " + fanStatus)
 	for _, accelerator := range m.latest.Accelerators {
 		builder.WriteString(fmt.Sprintf("\n%-13s %s", strings.ToUpper(accelerator.Type), statusText(accelerator.Frequency)))
+		if accelerator.RuntimeStatus.Status != "" {
+			builder.WriteString(fmt.Sprintf(" · %s", formatTextMetricCompact(accelerator.RuntimeStatus)))
+		}
 	}
 	if len(m.latest.Warnings) > 0 {
 		builder.WriteString("\n\n")
@@ -580,6 +710,60 @@ func formatMetricCompact(metric model.Metric, precision int) string {
 	}
 }
 
+func formatTextMetricCompact(metric model.TextMetric) string {
+	if metric.Status == model.Available && metric.Value != nil {
+		return *metric.Value
+	}
+	switch metric.Status {
+	case model.Unsupported:
+		return "N/A"
+	case model.PermissionDenied:
+		return "DENIED"
+	case model.Stale:
+		return "STALE"
+	default:
+		return "--"
+	}
+}
+
+func formatTextMetricValue(metric model.TextMetric) string {
+	if metric.Status != model.Available || metric.Value == nil {
+		return ""
+	}
+	return *metric.Value
+}
+
+func frequencyPolicySummary(policy *model.FrequencyPolicy) string {
+	if policy == nil {
+		return ""
+	}
+	parts := make([]string, 0, 3)
+	if value := frequencyRange(policy.Minimum, policy.Maximum); value != "" {
+		parts = append(parts, value)
+	}
+	if value := frequencyRange(policy.HardwareMinimum, policy.HardwareMaximum); value != "" {
+		parts = append(parts, "hw "+value)
+	}
+	if governor := formatTextMetricValue(policy.Governor); governor != "" {
+		parts = append(parts, governor)
+	}
+	return strings.Join(parts, " · ")
+}
+
+func frequencyRange(minimum, maximum model.Metric) string {
+	minimumValue, maximumValue := metricNumber(minimum), metricNumber(maximum)
+	switch {
+	case minimumValue >= 0 && maximumValue >= 0:
+		return fmt.Sprintf("%.0f–%.0fMHz", minimumValue, maximumValue)
+	case maximumValue >= 0:
+		return fmt.Sprintf("max %.0fMHz", maximumValue)
+	case minimumValue >= 0:
+		return fmt.Sprintf("min %.0fMHz", minimumValue)
+	default:
+		return ""
+	}
+}
+
 func formatMetricNumber(metric model.Metric, precision int) string {
 	if metric.Status != model.Available || metric.Value == nil {
 		return formatMetricCompact(metric, precision)
@@ -600,6 +784,46 @@ func formatTemperature(metric model.Metric) string {
 	default:
 		return goodStyle.Render(text)
 	}
+}
+
+func thermalTripSummary(zone model.ThermalZone) string {
+	var selected model.ThermalTrip
+	selectedTemperature := -1.0
+	for _, trip := range zone.Trips {
+		value := metricNumber(trip.Temperature)
+		if value >= 0 && (selectedTemperature < 0 || value < selectedTemperature) {
+			selected, selectedTemperature = trip, value
+		}
+	}
+	if selectedTemperature < 0 {
+		return ""
+	}
+	label := fallback(selected.Type, fmt.Sprintf("trip%d", selected.ID))
+	current := metricNumber(zone.Temperature)
+	if current < 0 {
+		return fmt.Sprintf("%s %.0f°C", label, selectedTemperature)
+	}
+	headroom := selectedTemperature - current
+	text := fmt.Sprintf("%s %.0f°C (%+.1f°C)", label, selectedTemperature, headroom)
+	switch {
+	case headroom <= 0:
+		return badStyle.Render(text)
+	case headroom <= 10:
+		return warnStyle.Render(text)
+	default:
+		return mutedStyle.Render(text)
+	}
+}
+
+func formatCoolingState(metric model.Metric) string {
+	text := formatMetricNumber(metric, 0)
+	if metric.Status != model.Available || metric.Value == nil {
+		return text
+	}
+	if *metric.Value > 0 {
+		return warnStyle.Render(text)
+	}
+	return goodStyle.Render(text)
 }
 
 func statusText(metric model.Metric) string {
@@ -680,6 +904,15 @@ func hottestThermal(zones []model.ThermalZone) (model.ThermalZone, bool) {
 		}
 	}
 	return hottest, value >= 0
+}
+
+func primaryPowerSensor(sensors []model.PowerSensor) (model.PowerSensor, bool) {
+	for _, sensor := range sensors {
+		if sensor.Kind == "power" && sensor.Value.Status == model.Available {
+			return sensor, true
+		}
+	}
+	return model.PowerSensor{}, false
 }
 
 func sortedProcesses(processes []model.ProcessInfo, order processSort) []model.ProcessInfo {

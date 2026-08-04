@@ -200,17 +200,36 @@ func snapshotChecks(snapshot model.Snapshot) []Check {
 		metricCheck("metric.cpu", "CPU usage", snapshot.CPU.Overall, true),
 		metricCheck("metric.memory", "Memory", snapshot.Memory.Total, true),
 		metricCheck("metric.load", "Load average", snapshot.Load.OneMinute, true),
+		capabilityMetricCheck("metric.memory.cma", "CMA accounting", snapshot.Memory.CMATotal),
+		capabilityMetricCheck("metric.pressure.memory", "Memory pressure (PSI)", snapshot.Memory.Pressure.Memory.Some.Avg10),
+	}
+	for _, core := range snapshot.CPU.Cores {
+		if core.Policy == nil {
+			continue
+		}
+		prefix := fmt.Sprintf("metric.cpu.core%d.policy", core.ID)
+		checks = append(checks,
+			capabilityMetricCheck(prefix+".minimum", fmt.Sprintf("CPU %d minimum frequency", core.ID), core.Policy.Minimum),
+			capabilityMetricCheck(prefix+".maximum", fmt.Sprintf("CPU %d maximum frequency", core.ID), core.Policy.Maximum),
+			capabilityTextMetricCheck(prefix+".governor", fmt.Sprintf("CPU %d governor", core.ID), core.Policy.Governor),
+		)
 	}
 	availableThermals := 0
+	availableTrips := 0
 	for _, zone := range snapshot.Thermals {
 		if zone.Temperature.Status == model.Available {
 			availableThermals++
+		}
+		for _, trip := range zone.Trips {
+			if trip.Temperature.Status == model.Available {
+				availableTrips++
+			}
 		}
 	}
 	if availableThermals > 0 {
 		checks = append(checks, Check{
 			ID: "metric.thermal", Name: "Thermal sensors", Status: StatusPass,
-			Message: fmt.Sprintf("%d readable temperature sources", availableThermals),
+			Message: fmt.Sprintf("%d readable temperature sources, %d trip points, %d cooling devices", availableThermals, availableTrips, len(snapshot.Cooling)),
 			Source:  snapshot.Thermals[0].Temperature.Source,
 		})
 	} else {
@@ -219,6 +238,38 @@ func snapshotChecks(snapshot model.Snapshot) []Check {
 			Message: "no readable thermal or hwmon temperature source",
 			Source:  "/sys/class/thermal, /sys/class/hwmon",
 		})
+	}
+	for index, device := range snapshot.Cooling {
+		prefix := fmt.Sprintf("metric.cooling.device%d", index)
+		name := fallback(device.Type, device.Name)
+		checks = append(checks,
+			metricCheck(prefix+".current_state", name+" current state", device.CurrentState, false),
+			metricCheck(prefix+".maximum_state", name+" maximum state", device.MaximumState, false),
+		)
+	}
+	if len(snapshot.Power) == 0 {
+		checks = append(checks, Check{
+			ID: "metric.power", Name: "Power sensors", Status: StatusInfo,
+			Message: "no hwmon voltage, current, power or energy source was discovered",
+			Source:  "/sys/class/hwmon",
+		})
+	} else {
+		for index, sensor := range snapshot.Power {
+			checks = append(checks, metricCheck(
+				fmt.Sprintf("metric.power.sensor%d", index),
+				fmt.Sprintf("%s %s", fallback(sensor.Name, sensor.Kind), sensor.Kind),
+				sensor.Value, false,
+			))
+		}
+	}
+	for index, fan := range snapshot.Fans {
+		prefix := fmt.Sprintf("metric.fan.device%d", index)
+		checks = append(checks,
+			capabilityMetricCheck(prefix+".speed", fan.Name+" speed", fan.Speed),
+			capabilityMetricCheck(prefix+".target", fan.Name+" target speed", fan.TargetSpeed),
+			capabilityMetricCheck(prefix+".pwm", fan.Name+" PWM", fan.PWM),
+			capabilityTextMetricCheck(prefix+".control_mode", fan.Name+" control mode", fan.ControlMode),
+		)
 	}
 	if len(snapshot.Processes) > 0 {
 		checks = append(checks, Check{
@@ -243,7 +294,15 @@ func snapshotChecks(snapshot model.Snapshot) []Check {
 		checks = append(checks,
 			metricCheck(prefix+".usage", accelerator.Name+" usage", accelerator.Usage, false),
 			metricCheck(prefix+".frequency", accelerator.Name+" frequency", accelerator.Frequency, false),
+			capabilityTextMetricCheck(prefix+".runtime_status", accelerator.Name+" runtime power state", accelerator.RuntimeStatus),
 		)
+		if accelerator.Policy != nil {
+			checks = append(checks,
+				capabilityMetricCheck(prefix+".policy.minimum", accelerator.Name+" minimum frequency", accelerator.Policy.Minimum),
+				capabilityMetricCheck(prefix+".policy.maximum", accelerator.Name+" maximum frequency", accelerator.Policy.Maximum),
+				capabilityTextMetricCheck(prefix+".policy.governor", accelerator.Name+" governor", accelerator.Policy.Governor),
+			)
+		}
 		for _, core := range accelerator.Cores {
 			check := metricCheck(
 				fmt.Sprintf("%s.core%d", prefix, core.ID),
@@ -258,6 +317,40 @@ func snapshotChecks(snapshot model.Snapshot) []Check {
 		}
 	}
 	return checks
+}
+
+func capabilityMetricCheck(id, name string, metric model.Metric) Check {
+	check := metricCheck(id, name, metric, false)
+	if metric.Status == "" || metric.Status == model.Unsupported {
+		check.Status = StatusInfo
+	}
+	return check
+}
+
+func capabilityTextMetricCheck(id, name string, metric model.TextMetric) Check {
+	check := Check{ID: id, Name: name, Source: metric.Source}
+	switch metric.Status {
+	case model.Available:
+		check.Status = StatusPass
+		check.Message = "selected source is readable"
+		if metric.Value != nil {
+			check.Message = *metric.Value
+		}
+	case model.PermissionDenied:
+		check.Status = StatusWarning
+		check.Message = fallback(metric.Error, "permission denied")
+		check.Suggestion = "Review read permissions for the selected source."
+	case "", model.Unsupported:
+		check.Status = StatusInfo
+		check.Message = fallback(metric.Error, "source is not exposed")
+	case model.Stale:
+		check.Status = StatusWarning
+		check.Message = fallback(metric.Error, "metric is stale")
+	default:
+		check.Status = StatusWarning
+		check.Message = fallback(metric.Error, "metric is unavailable")
+	}
+	return check
 }
 
 func metricCheck(id, name string, metric model.Metric, required bool) Check {

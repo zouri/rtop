@@ -241,11 +241,11 @@ func (m Model) scopeCommand() tea.Cmd {
 func scopeForPage(current page) model.CollectionScope {
 	switch current {
 	case pageCPU:
-		return model.CollectCPU | model.CollectMemory | model.CollectThermals
+		return model.CollectCPU | model.CollectMemory | model.CollectThermals | model.CollectPower
 	case pageMemory:
 		return model.CollectMemory | model.CollectProcesses
 	case pageEngines:
-		return model.CollectAccelerators | model.CollectThermals
+		return model.CollectAccelerators | model.CollectThermals | model.CollectPower
 	case pageProcesses:
 		return model.CollectProcesses
 	case pageInfo:
@@ -272,8 +272,11 @@ func collectedScope(snapshot model.Snapshot) model.CollectionScope {
 	if len(snapshot.Processes) > 0 {
 		scope |= model.CollectProcesses
 	}
-	if len(snapshot.Thermals) > 0 {
+	if len(snapshot.Thermals) > 0 || len(snapshot.Cooling) > 0 {
 		scope |= model.CollectThermals
+	}
+	if len(snapshot.Power) > 0 || len(snapshot.Fans) > 0 {
+		scope |= model.CollectPower
 	}
 	return scope
 }
@@ -298,6 +301,11 @@ func (m *Model) mergeSnapshot(snapshot model.Snapshot, scope model.CollectionSco
 	}
 	if scope.Includes(model.CollectThermals) {
 		m.latest.Thermals = snapshot.Thermals
+		m.latest.Cooling = snapshot.Cooling
+	}
+	if scope.Includes(model.CollectPower) {
+		m.latest.Power = snapshot.Power
+		m.latest.Fans = snapshot.Fans
 	}
 }
 

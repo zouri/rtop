@@ -78,17 +78,20 @@ func (c *Collector) collectNPU(device device, found bool, timestamp time.Time) (
 	}
 
 	runtimeSource := filepath.Join(device.path, "device", "power", "runtime_status")
-	if status, err := readText(c.fs, runtimeSource); err == nil && strings.EqualFold(status, "suspended") {
+	runtimeStatus := readTextMetric(c.fs, runtimeSource, timestamp)
+	if runtimeStatus.Status == model.Available && runtimeStatus.Value != nil && strings.EqualFold(*runtimeStatus.Value, "suspended") {
 		return model.Accelerator{
-			Name:      "RKNPU",
-			Type:      npuType,
-			Usage:     model.AvailableMetric(0, "%", runtimeSource, timestamp),
-			Frequency: model.MissingMetric(model.Stale, "MHz", runtimeSource, "device is runtime suspended; devfreq frequency is cached", timestamp),
-			Cores:     idleCores(max(1, c.expectedNPUCores), runtimeSource, timestamp),
+			Name:          "RKNPU",
+			Type:          npuType,
+			Usage:         model.AvailableMetric(0, "%", runtimeSource, timestamp),
+			Frequency:     model.MissingMetric(model.Stale, "MHz", runtimeSource, "device is runtime suspended; devfreq frequency is cached", timestamp),
+			Policy:        readFrequencyPolicy(c.fs, device, timestamp),
+			RuntimeStatus: runtimeStatus,
+			Cores:         idleCores(max(1, c.expectedNPUCores), runtimeSource, timestamp),
 		}, nil
 	}
 
-	info, warnings := c.collectDevice(device, true, npuType, "RKNPU", timestamp)
+	info, warnings := c.collectDeviceWithRuntime(device, npuType, "RKNPU", runtimeStatus, timestamp)
 	cores, coreWarning := c.readNPUCores(c.expectedNPUCores, timestamp)
 	info.Cores = cores
 	if aggregate, ok := aggregateCoreUsage(cores, timestamp); ok {
@@ -115,10 +118,18 @@ func (c *Collector) collectDevice(device device, found bool, kind, name string, 
 	if !found {
 		return missingAccelerator(kind, name, timestamp), nil
 	}
+	runtimeStatus := readTextMetric(c.fs, filepath.Join(device.path, "device", "power", "runtime_status"), timestamp)
+	return c.collectDeviceWithRuntime(device, kind, name, runtimeStatus, timestamp)
+}
+
+func (c *Collector) collectDeviceWithRuntime(
+	device device, kind, name string, runtimeStatus model.TextMetric, timestamp time.Time,
+) (model.Accelerator, []model.Warning) {
 	usage := readLoad(c.fs, device, timestamp)
 	frequency := readFrequency(c.fs, device, timestamp)
 	return model.Accelerator{
 		Name: name, Type: kind, Usage: usage, Frequency: frequency,
+		Policy: readFrequencyPolicy(c.fs, device, timestamp), RuntimeStatus: runtimeStatus,
 	}, metricWarnings(kind, usage, frequency)
 }
 
@@ -231,12 +242,81 @@ func readFrequency(systemFS sysfs.SystemFS, device device, timestamp time.Time) 
 	return missingForError(bestErr, "MHz", candidates[0], timestamp)
 }
 
+func readFrequencyPolicy(systemFS sysfs.SystemFS, device device, timestamp time.Time) *model.FrequencyPolicy {
+	hardwareMinimum, hardwareMaximum := readAvailableFrequencyRange(systemFS, device, timestamp)
+	return &model.FrequencyPolicy{
+		Minimum:         readFrequencyPath(systemFS, filepath.Join(device.path, "min_freq"), timestamp),
+		Maximum:         readFrequencyPath(systemFS, filepath.Join(device.path, "max_freq"), timestamp),
+		HardwareMinimum: hardwareMinimum,
+		HardwareMaximum: hardwareMaximum,
+		Governor:        readTextMetric(systemFS, filepath.Join(device.path, "governor"), timestamp),
+	}
+}
+
+func readFrequencyPath(systemFS sysfs.SystemFS, path string, timestamp time.Time) model.Metric {
+	data, err := systemFS.ReadFile(path)
+	if err != nil {
+		return model.MissingMetric(sysfs.StatusForError(err), "MHz", path, err.Error(), timestamp)
+	}
+	value, err := parseNumber(data)
+	if err != nil {
+		return model.MissingMetric(model.Unavailable, "MHz", path, err.Error(), timestamp)
+	}
+	return model.AvailableMetric(value/1_000_000, "MHz", path, timestamp)
+}
+
+func readAvailableFrequencyRange(
+	systemFS sysfs.SystemFS, device device, timestamp time.Time,
+) (model.Metric, model.Metric) {
+	path := filepath.Join(device.path, "available_frequencies")
+	data, err := systemFS.ReadFile(path)
+	if err != nil {
+		status := sysfs.StatusForError(err)
+		return model.MissingMetric(status, "MHz", path, err.Error(), timestamp),
+			model.MissingMetric(status, "MHz", path, err.Error(), timestamp)
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) == 0 {
+		message := "available_frequencies is empty"
+		return model.MissingMetric(model.Unavailable, "MHz", path, message, timestamp),
+			model.MissingMetric(model.Unavailable, "MHz", path, message, timestamp)
+	}
+	minimum, maximum := 0.0, 0.0
+	for index, field := range fields {
+		value, parseErr := strconv.ParseFloat(field, 64)
+		if parseErr != nil || value <= 0 {
+			message := fmt.Sprintf("invalid available frequency %q", field)
+			return model.MissingMetric(model.Unavailable, "MHz", path, message, timestamp),
+				model.MissingMetric(model.Unavailable, "MHz", path, message, timestamp)
+		}
+		if index == 0 || value < minimum {
+			minimum = value
+		}
+		if index == 0 || value > maximum {
+			maximum = value
+		}
+	}
+	return model.AvailableMetric(minimum/1_000_000, "MHz", path, timestamp),
+		model.AvailableMetric(maximum/1_000_000, "MHz", path, timestamp)
+}
+
 func readText(systemFS sysfs.SystemFS, path string) (string, error) {
 	data, err := systemFS.ReadFile(path)
 	if err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(string(data)), nil
+}
+
+func readTextMetric(systemFS sysfs.SystemFS, path string, timestamp time.Time) model.TextMetric {
+	value, err := readText(systemFS, path)
+	if err != nil {
+		return model.MissingTextMetric(sysfs.StatusForError(err), path, err.Error(), timestamp)
+	}
+	if value == "" {
+		return model.MissingTextMetric(model.Unavailable, path, "empty text value", timestamp)
+	}
+	return model.AvailableTextMetric(value, path, timestamp)
 }
 
 func parseLoad(data []byte) (float64, error) {
@@ -285,10 +365,11 @@ func missingAccelerator(kind, name string, timestamp time.Time) model.Accelerato
 	source := "/sys/class/devfreq"
 	message := fmt.Sprintf("%s devfreq device was not discovered", kind)
 	return model.Accelerator{
-		Name:      name,
-		Type:      kind,
-		Usage:     model.MissingMetric(model.Unsupported, "%", source, message, timestamp),
-		Frequency: model.MissingMetric(model.Unsupported, "MHz", source, message, timestamp),
+		Name:          name,
+		Type:          kind,
+		Usage:         model.MissingMetric(model.Unsupported, "%", source, message, timestamp),
+		Frequency:     model.MissingMetric(model.Unsupported, "MHz", source, message, timestamp),
+		RuntimeStatus: model.MissingTextMetric(model.Unsupported, source, message, timestamp),
 	}
 }
 
