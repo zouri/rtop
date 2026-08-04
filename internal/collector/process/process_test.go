@@ -83,9 +83,63 @@ func TestCollectorCalculatesCPUAndMemory(t *testing.T) {
 	if process.Memory.Value == nil || *process.Memory.Value != 20 {
 		t.Fatalf("memory = %#v", process.Memory)
 	}
+	if process.Memory.Source != "/proc/100/status" {
+		t.Fatalf("memory source = %q", process.Memory.Source)
+	}
 	if process.Threads != 4 {
 		t.Fatalf("threads = %d", process.Threads)
 	}
+}
+
+func TestCollectorReportsStatSourceWhenStatusHasNoRSS(t *testing.T) {
+	root := filepath.Join("..", "..", "..", "testdata", "generic-linux")
+	systemFS := &statusWithoutRSSFS{SystemFS: sysfs.MustNew(root)}
+	processes, warnings := NewCollector(systemFS, time.Nanosecond).Collect(context.Background())
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %#v", warnings)
+	}
+	if len(processes) != 1 {
+		t.Fatalf("processes = %#v", processes)
+	}
+	if got := processes[0].Memory.Source; got != "/proc/100/stat" {
+		t.Fatalf("memory source = %q", got)
+	}
+}
+
+func TestBuildReturnsAllProcessesOrderedByPID(t *testing.T) {
+	current := &capture{
+		timestamp: time.Now(),
+		processes: make(map[int]sample, 250),
+	}
+	for pid := 250; pid >= 1; pid-- {
+		current.processes[pid] = sample{
+			stat:         Stat{PID: pid, Name: "process"},
+			statPath:     "/proc/stat",
+			memorySource: "/proc/status",
+		}
+	}
+
+	processes := (&Collector{}).build(current, nil)
+	if len(processes) != 250 {
+		t.Fatalf("process count = %d, want 250", len(processes))
+	}
+	for i, process := range processes {
+		wantPID := i + 1
+		if process.PID != wantPID {
+			t.Fatalf("processes[%d].PID = %d, want %d", i, process.PID, wantPID)
+		}
+	}
+}
+
+type statusWithoutRSSFS struct {
+	sysfs.SystemFS
+}
+
+func (f *statusWithoutRSSFS) ReadFile(path string) ([]byte, error) {
+	if path == "/proc/100/status" {
+		return []byte("Threads:\t4\n"), nil
+	}
+	return f.SystemFS.ReadFile(path)
 }
 
 type sequenceFS struct {

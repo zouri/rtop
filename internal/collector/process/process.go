@@ -17,9 +17,8 @@ import (
 )
 
 const (
-	procStatPath    = "/proc/stat"
-	procGlob        = "/proc/[0-9]*"
-	maxProcessCount = 200
+	procStatPath = "/proc/stat"
+	procGlob     = "/proc/[0-9]*"
 )
 
 type Stat struct {
@@ -239,13 +238,14 @@ func (c *Collector) capture() (*capture, error) {
 		status, statusErr := c.readStatus(statusPath)
 		rssBytes := status.RSSBytes
 		memorySource := statusPath
+		if statusErr != nil {
+			memorySource = statPath
+		}
 		if rssBytes == 0 && processStat.RSSPages > 0 {
 			pages := uint64(processStat.RSSPages)
 			if pages <= ^uint64(0)/c.pageSize {
 				rssBytes = pages * c.pageSize
-				if statusErr != nil {
-					memorySource = statPath
-				}
+				memorySource = statPath
 			}
 		}
 		threads := status.Threads
@@ -289,15 +289,8 @@ func (c *Collector) build(current, previous *capture) []model.ProcessInfo {
 		})
 	}
 	sort.Slice(result, func(i, j int) bool {
-		left, right := metricValue(result[i].CPU), metricValue(result[j].CPU)
-		if left == right {
-			return result[i].PID < result[j].PID
-		}
-		return left > right
+		return result[i].PID < result[j].PID
 	})
-	if len(result) > maxProcessCount {
-		result = result[:maxProcessCount]
-	}
 	return result
 }
 
@@ -311,11 +304,4 @@ func processCPU(previousProcess, currentProcess sample, previous, current *captu
 	processDelta := currentProcess.stat.Ticks - previousProcess.stat.Ticks
 	value := float64(processDelta) * float64(current.cores) * 100 / float64(totalDelta)
 	return model.AvailableMetric(value, "%", currentProcess.statPath, current.timestamp)
-}
-
-func metricValue(metric model.Metric) float64 {
-	if metric.Status != model.Available || metric.Value == nil {
-		return -1
-	}
-	return *metric.Value
 }

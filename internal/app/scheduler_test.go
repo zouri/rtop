@@ -56,6 +56,27 @@ func TestSchedulerPublishesLatestAndStops(t *testing.T) {
 	}
 }
 
+func TestPeriodicSnapshotTimeoutCoversSamplingWindow(t *testing.T) {
+	tests := []struct {
+		name       string
+		interval   time.Duration
+		cpuSample  time.Duration
+		wantBudget time.Duration
+	}{
+		{name: "default", interval: time.Second, cpuSample: 200 * time.Millisecond, wantBudget: 1200 * time.Millisecond},
+		{name: "long interval", interval: 5 * time.Second, cpuSample: 200 * time.Millisecond, wantBudget: 5 * time.Second},
+		{name: "long sample", interval: 100 * time.Millisecond, cpuSample: 2 * time.Second, wantBudget: 3 * time.Second},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := runtimeConfig{interval: test.interval, cpuSampleDuration: test.cpuSample}
+			if got := periodicSnapshotTimeout(config); got != test.wantBudget {
+				t.Fatalf("periodicSnapshotTimeout() = %s, want %s", got, test.wantBudget)
+			}
+		})
+	}
+}
+
 type countingSource struct {
 	mu    sync.Mutex
 	count int

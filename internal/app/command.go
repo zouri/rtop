@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"math"
 	"strconv"
 	"strings"
@@ -24,7 +23,6 @@ type runtimeConfig struct {
 	root              string
 	interval          time.Duration
 	cpuSampleDuration time.Duration
-	logLevel          string
 }
 
 func NewCommand(version, commit, date string, stdout, stderr io.Writer) *cobra.Command {
@@ -32,7 +30,6 @@ func NewCommand(version, commit, date string, stdout, stderr io.Writer) *cobra.C
 		root:              "/",
 		interval:          time.Second,
 		cpuSampleDuration: 200 * time.Millisecond,
-		logLevel:          "warn",
 	}
 	command := &cobra.Command{
 		Use:           "rtop",
@@ -52,22 +49,6 @@ func NewCommand(version, commit, date string, stdout, stderr io.Writer) *cobra.C
 	command.PersistentFlags().StringVar(&config.root, "root", config.root, "target system root (for fixtures and containers)")
 	command.PersistentFlags().DurationVar(&config.interval, "interval", config.interval, "TUI and snapshot watch refresh interval")
 	command.PersistentFlags().DurationVar(&config.cpuSampleDuration, "cpu-sample", config.cpuSampleDuration, "CPU usage sampling window")
-	command.PersistentFlags().StringVar(&config.logLevel, "log-level", config.logLevel, "log level: debug, info, warn, error")
-
-	command.PersistentPreRunE = func(_ *cobra.Command, _ []string) error {
-		if config.interval <= 0 {
-			return errors.New("--interval must be greater than zero")
-		}
-		if config.cpuSampleDuration <= 0 {
-			return errors.New("--cpu-sample must be greater than zero")
-		}
-		level, err := parseLogLevel(config.logLevel)
-		if err != nil {
-			return err
-		}
-		slog.SetDefault(slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: level})))
-		return nil
-	}
 
 	command.AddCommand(newInfoCommand(&config, stdout))
 	command.AddCommand(newSnapshotCommand(&config, stdout))
@@ -76,12 +57,15 @@ func NewCommand(version, commit, date string, stdout, stderr io.Writer) *cobra.C
 }
 
 func runTUI(ctx context.Context, config runtimeConfig, stdout io.Writer) error {
+	if err := validateSampling(config, true); err != nil {
+		return err
+	}
 	systemFS, err := sysfs.New(config.root)
 	if err != nil {
 		return err
 	}
 	monitor := NewMonitor(systemFS, config.cpuSampleDuration)
-	scheduler := NewScheduler(monitor.Snapshot, config.interval, max(config.interval, time.Second))
+	scheduler := NewScheduler(monitor.Snapshot, config.interval, periodicSnapshotTimeout(config))
 	tuiContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 	return ui.Run(tuiContext, scheduler.Run(tuiContext), scheduler.Refresh, stdout)
@@ -140,6 +124,9 @@ func newDoctorCommand(config *runtimeConfig, stdout io.Writer) *cobra.Command {
 		Short: "Diagnose platform detection, drivers, permissions and metric sources",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
+			if err := validateSampling(*config, false); err != nil {
+				return err
+			}
 			systemFS, err := sysfs.New(config.root)
 			if err != nil {
 				return err
@@ -157,13 +144,16 @@ func newDoctorCommand(config *runtimeConfig, stdout io.Writer) *cobra.Command {
 }
 
 func runSnapshot(ctx context.Context, config runtimeConfig, stdout io.Writer, asJSON, watch bool) error {
+	if err := validateSampling(config, watch); err != nil {
+		return err
+	}
 	systemFS, err := sysfs.New(config.root)
 	if err != nil {
 		return err
 	}
 	monitor := NewMonitor(systemFS, config.cpuSampleDuration)
 	if watch {
-		scheduler := NewScheduler(monitor.Snapshot, config.interval, max(config.interval, time.Second))
+		scheduler := NewScheduler(monitor.Snapshot, config.interval, periodicSnapshotTimeout(config))
 		for snapshot := range scheduler.Run(ctx) {
 			if err := writeJSON(stdout, snapshot, false); err != nil {
 				return err
@@ -177,6 +167,20 @@ func runSnapshot(ctx context.Context, config runtimeConfig, stdout io.Writer, as
 	}
 	printSnapshot(stdout, snapshot)
 	return nil
+}
+
+func validateSampling(config runtimeConfig, requireInterval bool) error {
+	if requireInterval && config.interval <= 0 {
+		return errors.New("--interval must be greater than zero")
+	}
+	if config.cpuSampleDuration <= 0 {
+		return errors.New("--cpu-sample must be greater than zero")
+	}
+	return nil
+}
+
+func periodicSnapshotTimeout(config runtimeConfig) time.Duration {
+	return max(config.interval, config.cpuSampleDuration+time.Second)
 }
 
 func writeJSON(writer io.Writer, value any, pretty bool) error {
@@ -249,21 +253,6 @@ func formatMetric(metric model.Metric, precision int) string {
 		return "[unavailable]"
 	}
 	return strconv.FormatFloat(value, 'f', precision, 64) + metric.Unit
-}
-
-func parseLogLevel(value string) (slog.Level, error) {
-	switch strings.ToLower(value) {
-	case "debug":
-		return slog.LevelDebug, nil
-	case "info":
-		return slog.LevelInfo, nil
-	case "warn", "warning":
-		return slog.LevelWarn, nil
-	case "error":
-		return slog.LevelError, nil
-	default:
-		return 0, fmt.Errorf("invalid --log-level %q", value)
-	}
 }
 
 func fallback(value, replacement string) string {
