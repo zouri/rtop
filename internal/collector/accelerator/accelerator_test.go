@@ -56,6 +56,33 @@ func TestCollectorFromBSP510Fixture(t *testing.T) {
 	}
 }
 
+func TestCollectorCachesDynamicSourcesAndStaticRanges(t *testing.T) {
+	root := filepath.Join("..", "..", "..", "testdata", "rk3588-bsp510")
+	tracked := &readCountingFS{SystemFS: sysfs.MustNew(root), reads: make(map[string]int)}
+	collector := NewCollector(tracked)
+	collector.Collect()
+	collector.Collect()
+
+	for _, path := range []string{
+		"/sys/class/devfreq/mali/available_frequencies",
+		"/sys/class/devfreq/rknpu/available_frequencies",
+		"/sys/class/devfreq/rockchip-dmc/available_frequencies",
+		"/sys/class/devfreq/rockchip-dmc/load",
+		"/sys/class/devfreq/rockchip-dmc/utilization",
+		"/sys/class/devfreq/rockchip-dmc/utilisation",
+		"/sys/class/devfreq/rockchip-dmc/busy_time",
+		"/sys/class/devfreq/rockchip-dmc/total_time",
+	} {
+		if tracked.reads[path] != 1 {
+			t.Fatalf("reads[%s] = %d, want 1", path, tracked.reads[path])
+		}
+	}
+	if tracked.reads["/sys/class/devfreq/mali/load"] != 2 ||
+		tracked.reads["/sys/class/devfreq/mali/cur_freq"] != 2 {
+		t.Fatalf("selected GPU sources were not refreshed: %#v", tracked.reads)
+	}
+}
+
 func TestParseLoadFormats(t *testing.T) {
 	for input, want := range map[string]float64{
 		"28@528000000Hz": 28,
@@ -197,6 +224,16 @@ func (f *permissionFS) ReadFile(path string) ([]byte, error) {
 	if path == "/sys/class/devfreq/fb000000.gpu/load" || strings.HasPrefix(path, "/sys/kernel/debug/") {
 		return nil, os.ErrPermission
 	}
+	return f.SystemFS.ReadFile(path)
+}
+
+type readCountingFS struct {
+	sysfs.SystemFS
+	reads map[string]int
+}
+
+func (f *readCountingFS) ReadFile(path string) ([]byte, error) {
+	f.reads[path]++
 	return f.SystemFS.ReadFile(path)
 }
 

@@ -59,7 +59,8 @@ func TestCollectorCalculatesCPUAndMemory(t *testing.T) {
 			"/proc/100/exe": "/usr/bin/fixture-worker",
 		},
 	}
-	processes, warnings := NewCollector(fixture, time.Nanosecond).Collect(context.Background())
+	collector := NewCollector(fixture, time.Nanosecond)
+	processes, warnings := collector.Collect(context.Background())
 	if len(warnings) != 0 {
 		t.Fatalf("warnings = %#v", warnings)
 	}
@@ -85,6 +86,10 @@ func TestCollectorCalculatesCPUAndMemory(t *testing.T) {
 	}
 	if process.Path != "/usr/bin/fixture-worker" {
 		t.Fatalf("path = %q", process.Path)
+	}
+	_, _ = collector.Collect(context.Background())
+	if fixture.linkReads["/proc/100/exe"] != 1 {
+		t.Fatalf("exe link reads = %d, want 1", fixture.linkReads["/proc/100/exe"])
 	}
 	if fixture.reads["/proc/100/status"] != 0 {
 		t.Fatalf("status reads = %d, want 0", fixture.reads["/proc/100/status"])
@@ -116,11 +121,24 @@ func TestBuildReturnsAllProcessesOrderedByPID(t *testing.T) {
 	}
 }
 
+func TestPreviousProcessRejectsReusedPID(t *testing.T) {
+	previous := &capture{processes: map[int]sample{
+		42: {stat: Stat{PID: 42, StartTime: 100}, executablePath: "/usr/bin/old"},
+	}}
+	if process, ok := previousProcess(previous, Stat{PID: 42, StartTime: 100}); !ok || process.executablePath != "/usr/bin/old" {
+		t.Fatalf("same process was not reused: %#v, %v", process, ok)
+	}
+	if _, ok := previousProcess(previous, Stat{PID: 42, StartTime: 200}); ok {
+		t.Fatal("reused PID inherited the previous executable path")
+	}
+}
+
 type sequenceFS struct {
 	sysfs.SystemFS
-	reads map[string]int
-	next  map[string][]byte
-	links map[string]string
+	reads     map[string]int
+	next      map[string][]byte
+	links     map[string]string
+	linkReads map[string]int
 }
 
 func (f *sequenceFS) ReadFile(path string) ([]byte, error) {
@@ -137,6 +155,10 @@ func (f *sequenceFS) ReadFile(path string) ([]byte, error) {
 }
 
 func (f *sequenceFS) Readlink(path string) (string, error) {
+	if f.linkReads == nil {
+		f.linkReads = make(map[string]int)
+	}
+	f.linkReads[path]++
 	if target, ok := f.links[path]; ok {
 		return target, nil
 	}

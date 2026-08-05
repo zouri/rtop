@@ -136,7 +136,7 @@ func (c *Collector) Collect(ctx context.Context) ([]model.ProcessInfo, []model.W
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	current, err := c.capture()
+	current, err := c.capture(c.previous)
 	if err != nil {
 		return []model.ProcessInfo{}, []model.Warning{{
 			Component: "process",
@@ -157,7 +157,7 @@ func (c *Collector) Collect(ctx context.Context) ([]model.ProcessInfo, []model.W
 		case <-timer.C:
 		}
 		previous = current
-		current, err = c.capture()
+		current, err = c.capture(previous)
 		if err != nil {
 			c.previous = previous
 			return c.build(previous, nil), []model.Warning{{
@@ -170,7 +170,7 @@ func (c *Collector) Collect(ctx context.Context) ([]model.ProcessInfo, []model.W
 	return c.build(current, previous), nil
 }
 
-func (c *Collector) capture() (*capture, error) {
+func (c *Collector) capture(previous *capture) (*capture, error) {
 	statData, err := c.fs.ReadFile(procStatPath)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", procStatPath, err)
@@ -209,13 +209,26 @@ func (c *Collector) capture() (*capture, error) {
 				rssBytes = pages * c.pageSize
 			}
 		}
-		executablePath, _ := c.fs.Readlink(path + "/exe")
+		executablePath := ""
+		if previousProcess, ok := previousProcess(previous, processStat); ok {
+			executablePath = previousProcess.executablePath
+		} else {
+			executablePath, _ = c.fs.Readlink(path + "/exe")
+		}
 		result.processes[processStat.PID] = sample{
 			stat: processStat, executablePath: executablePath,
 			rssBytes: rssBytes, statPath: statPath, memorySource: statPath,
 		}
 	}
 	return result, nil
+}
+
+func previousProcess(previous *capture, processStat Stat) (sample, bool) {
+	if previous == nil {
+		return sample{}, false
+	}
+	process, ok := previous.processes[processStat.PID]
+	return process, ok && process.stat.StartTime == processStat.StartTime
 }
 
 func (c *Collector) build(current, previous *capture) []model.ProcessInfo {

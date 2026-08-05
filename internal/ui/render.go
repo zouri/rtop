@@ -2,7 +2,6 @@ package ui
 
 import (
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -342,7 +341,10 @@ func (m Model) overviewEnginesCard(width int) string {
 }
 
 func (m Model) topProcessesCard(width, limit int, order processSort) string {
-	processes := sortedProcesses(m.latest.Processes, order)
+	processes := m.topCPUProcesses
+	if order == sortMemory {
+		processes = m.topMemoryProcesses
+	}
 	var builder strings.Builder
 	title := "TOP PROCESSES · CPU"
 	if order == sortMemory {
@@ -1007,21 +1009,6 @@ func primaryPowerSensor(sensors []model.PowerSensor) (model.PowerSensor, bool) {
 		}
 	}
 	return model.PowerSensor{}, false
-}
-
-func sortedProcesses(processes []model.ProcessInfo, order processSort) []model.ProcessInfo {
-	result := append([]model.ProcessInfo(nil), processes...)
-	sort.SliceStable(result, func(i, j int) bool {
-		left, right := metricNumber(result[i].CPU), metricNumber(result[j].CPU)
-		if order == sortMemory {
-			left, right = metricNumber(result[i].Memory), metricNumber(result[j].Memory)
-		}
-		if left == right {
-			return result[i].PID < result[j].PID
-		}
-		return left > right
-	})
-	return result
 }
 
 func metricHeading(order processSort) string {

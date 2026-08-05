@@ -58,6 +58,7 @@ func TestProcessesAreSortedOnlyWhenDataOrSortModeChanges(t *testing.T) {
 		{PID: 2, CPU: model.AvailableMetric(20, "%", "/proc/2/stat", now), Memory: model.AvailableMetric(20, "MiB", "/proc/2/stat", now)},
 	}
 	uiModel := NewModel(make(chan model.Snapshot), nil)
+	uiModel.setPage(pageProcesses)
 	updated, _ := uiModel.Update(snapshotMsg{snapshot: snapshot})
 	uiModel = updated.(Model)
 	if got := []int{uiModel.processes[0].PID, uiModel.processes[1].PID, uiModel.processes[2].PID}; got[0] != 1 || got[1] != 2 || got[2] != 3 {
@@ -67,7 +68,7 @@ func TestProcessesAreSortedOnlyWhenDataOrSortModeChanges(t *testing.T) {
 		t.Fatal("sorting mutated the snapshot process order")
 	}
 
-	uiModel.page = pageProcesses
+	uiModel.setPage(pageProcesses)
 	updated, _ = uiModel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
 	uiModel = updated.(Model)
 	if got := []int{uiModel.processes[0].PID, uiModel.processes[1].PID, uiModel.processes[2].PID}; got[0] != 3 || got[1] != 2 || got[2] != 1 {
@@ -85,6 +86,27 @@ func TestSameProcessSliceDetection(t *testing.T) {
 	}
 	if sameProcessSlice(processes, processes[:1]) {
 		t.Fatal("different length was reported as unchanged")
+	}
+}
+
+func TestTopRankedProcessesKeepsOnlyBestEntries(t *testing.T) {
+	now := time.Now()
+	processes := []model.ProcessInfo{
+		{PID: 4, CPU: model.AvailableMetric(40, "%", "cpu", now), Memory: model.AvailableMetric(10, "MiB", "memory", now)},
+		{PID: 2, CPU: model.AvailableMetric(20, "%", "cpu", now), Memory: model.AvailableMetric(40, "MiB", "memory", now)},
+		{PID: 1, CPU: model.AvailableMetric(40, "%", "cpu", now), Memory: model.AvailableMetric(20, "MiB", "memory", now)},
+		{PID: 3, CPU: model.AvailableMetric(30, "%", "cpu", now), Memory: model.AvailableMetric(30, "MiB", "memory", now)},
+	}
+	cpu := topRankedProcesses(processes, 3, sortCPU)
+	memory := topRankedProcesses(processes, 3, sortMemory)
+	if got := []int{cpu[0].PID, cpu[1].PID, cpu[2].PID}; got[0] != 1 || got[1] != 4 || got[2] != 3 {
+		t.Fatalf("CPU ranking = %v", got)
+	}
+	if got := []int{memory[0].PID, memory[1].PID, memory[2].PID}; got[0] != 2 || got[1] != 3 || got[2] != 1 {
+		t.Fatalf("memory ranking = %v", got)
+	}
+	if processes[0].PID != 4 {
+		t.Fatal("ranking mutated its input")
 	}
 }
 
@@ -178,7 +200,7 @@ func TestProcessPathShortcutTogglesExecutablePaths(t *testing.T) {
 	uiModel = updated.(Model)
 	updated, _ = uiModel.Update(snapshotMsg{snapshot: snapshot})
 	uiModel = updated.(Model)
-	uiModel.page = pageProcesses
+	uiModel.setPage(pageProcesses)
 
 	if view := ansi.Strip(uiModel.View()); strings.Contains(view, "/usr/bin/fixture-worker") {
 		t.Fatalf("process path is visible before toggling:\n%s", view)
@@ -214,7 +236,7 @@ func TestViewNeverExceedsTerminalWidth(t *testing.T) {
 			updated, _ = uiModel.Update(snapshotMsg{snapshot: testSnapshot()})
 			uiModel = updated.(Model)
 			for _, currentPage := range []page{pageAll, pageCPU, pageMemory, pageEngines, pageProcesses, pageInfo} {
-				uiModel.page = currentPage
+				uiModel.setPage(currentPage)
 				for _, showPath := range []bool{false, true} {
 					uiModel.showProcessPath = showPath
 					assertViewFitsTerminal(t, uiModel)
@@ -279,7 +301,7 @@ func TestProcessSelectionRemainsVisibleAfterResize(t *testing.T) {
 	uiModel = updated.(Model)
 	updated, _ = uiModel.Update(snapshotMsg{snapshot: snapshot})
 	uiModel = updated.(Model)
-	uiModel.page = pageProcesses
+	uiModel.setPage(pageProcesses)
 	uiModel.selected = len(snapshot.Processes) - 1
 	uiModel.showProcessDetail = true
 

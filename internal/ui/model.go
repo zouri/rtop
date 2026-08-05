@@ -38,16 +38,18 @@ type Model struct {
 	hasData      bool
 	closed       bool
 
-	width             int
-	height            int
-	page              page
-	showHelp          bool
-	showProcessDetail bool
-	showProcessPath   bool
-	processSort       processSort
-	selected          int
-	scrollOffset      int
-	processes         []model.ProcessInfo
+	width              int
+	height             int
+	page               page
+	showHelp           bool
+	showProcessDetail  bool
+	showProcessPath    bool
+	processSort        processSort
+	selected           int
+	scrollOffset       int
+	processes          []model.ProcessInfo
+	topCPUProcesses    []model.ProcessInfo
+	topMemoryProcesses []model.ProcessInfo
 
 	cpuHistory    []float64
 	memoryHistory []float64
@@ -110,7 +112,10 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.mergeSnapshot(message.snapshot, scope)
 		m.hasData = true
 		if processesChanged {
-			m.sortProcesses()
+			m.updateProcessRankings()
+			if m.page == pageProcesses {
+				m.sortProcesses()
+			}
 		}
 		m.addHistory(message.snapshot)
 		m.clampSelection()
@@ -228,9 +233,14 @@ func sameProcessSlice(left, right []model.ProcessInfo) bool {
 }
 
 func (m *Model) setPage(next page) {
+	previous := m.page
 	m.page = next
 	m.showHelp = false
 	m.scrollOffset = 0
+	if next == pageProcesses && previous != pageProcesses {
+		m.sortProcesses()
+		m.clampSelection()
+	}
 }
 
 func (m Model) scopeCommand() tea.Cmd {
@@ -360,6 +370,47 @@ func (m *Model) sortProcesses() {
 			}
 		}
 	}
+}
+
+func (m *Model) updateProcessRankings() {
+	const maximumOverviewProcesses = 8
+	m.topCPUProcesses = topRankedProcesses(m.latest.Processes, maximumOverviewProcesses, sortCPU)
+	m.topMemoryProcesses = topRankedProcesses(m.latest.Processes, maximumOverviewProcesses, sortMemory)
+}
+
+func topRankedProcesses(processes []model.ProcessInfo, limit int, order processSort) []model.ProcessInfo {
+	if limit <= 0 || len(processes) == 0 {
+		return []model.ProcessInfo{}
+	}
+	limit = min(limit, len(processes))
+	result := make([]model.ProcessInfo, 0, limit)
+	for _, process := range processes {
+		index := sort.Search(len(result), func(index int) bool {
+			return processRanksBefore(process, result[index], order)
+		})
+		if index >= limit {
+			continue
+		}
+		if len(result) < limit {
+			result = append(result, model.ProcessInfo{})
+			copy(result[index+1:], result[index:len(result)-1])
+		} else {
+			copy(result[index+1:], result[index:len(result)-1])
+		}
+		result[index] = process
+	}
+	return result
+}
+
+func processRanksBefore(left, right model.ProcessInfo, order processSort) bool {
+	leftValue, rightValue := metricNumber(left.CPU), metricNumber(right.CPU)
+	if order == sortMemory {
+		leftValue, rightValue = metricNumber(left.Memory), metricNumber(right.Memory)
+	}
+	if leftValue == rightValue {
+		return left.PID < right.PID
+	}
+	return leftValue > rightValue
 }
 
 func (m *Model) addHistory(snapshot model.Snapshot) {
