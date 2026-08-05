@@ -22,15 +22,15 @@ go build -buildvcs=false ./cmd/rtop
 使用一行命令安装最新的 Linux ARM64 版本：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/zouri/rtop/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/zouri/rtop/main/scripts/install.sh | sudo sh
 ```
 
-安装脚本会校验发布包的 SHA-256。目录可写时安装到 `/usr/local/bin`，否则安装到
-`~/.local/bin`。可以通过 `RTOP_VERSION=v0.1.0` 安装指定版本，或通过
-`RTOP_INSTALL_DIR=/custom/bin` 指定安装目录：
+安装脚本会校验发布包的 SHA-256，并要求使用 root 权限将程序安装到全局路径
+`/usr/bin/rtop`。这样普通用户和 `sudo` 环境都能直接找到该命令。可以通过
+`RTOP_VERSION=v0.1.0` 安装指定版本：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/zouri/rtop/main/scripts/install.sh | RTOP_VERSION=v0.1.0 sh
+curl -fsSL https://raw.githubusercontent.com/zouri/rtop/main/scripts/install.sh | sudo env RTOP_VERSION=v0.1.0 sh
 ```
 
 ## 使用

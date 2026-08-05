@@ -68,6 +68,7 @@ case "$(uname -m)" in
     *) fail "only ARM64 is currently supported" ;;
 esac
 
+[ "$(id -u)" -eq 0 ] || fail "root privileges are required; run the installer with sudo sh"
 command_exists tar || fail "tar is required"
 temporary_directory=$(mktemp -d "${TMPDIR:-/tmp}/rtop-install.XXXXXX")
 trap 'rm -rf -- "$temporary_directory"' EXIT HUP INT TERM
@@ -87,21 +88,8 @@ tar -xzf "$archive_path" -C "$temporary_directory"
 binary="$temporary_directory/rtop-$version-linux-arm64/rtop"
 [ -f "$binary" ] || fail "the release archive does not contain rtop"
 
-if [ -n "${RTOP_INSTALL_DIR:-}" ]; then
-    install_directory="$RTOP_INSTALL_DIR"
-elif [ "$(id -u)" -eq 0 ] || [ -w /usr/local/bin ]; then
-    install_directory=/usr/local/bin
-else
-    [ -n "${HOME:-}" ] || fail "HOME is not set; specify RTOP_INSTALL_DIR"
-    install_directory="${XDG_BIN_HOME:-$HOME/.local/bin}"
-fi
+[ -d /usr/bin ] || fail "/usr/bin does not exist"
+cp "$binary" /usr/bin/rtop
+chmod 0755 /usr/bin/rtop
 
-mkdir -p "$install_directory"
-cp "$binary" "$install_directory/rtop"
-chmod 0755 "$install_directory/rtop"
-
-printf 'Installed rtop %s to %s/rtop\n' "$version" "$install_directory"
-case ":${PATH:-}:" in
-    *":$install_directory:"*) ;;
-    *) printf 'Add %s to PATH to run rtop from any directory.\n' "$install_directory" ;;
-esac
+printf 'Installed rtop %s to /usr/bin/rtop\n' "$version"
