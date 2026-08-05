@@ -1,25 +1,58 @@
-name: ci
+name: CI
 
 on:
   push:
+    branches:
+      - main
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  test:
+  checks:
+    name: Test, vet and build
     runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
+    timeout-minutes: 15
 
-      - uses: actions/setup-go@v5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
 
-      - name: Unit tests
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Check formatting
+        shell: bash
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [[ -n "$unformatted" ]]; then
+            echo "The following files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Check shell scripts
+        run: |
+          sh -n scripts/install.sh
+          bash -n scripts/package.sh
+
+      - name: Run tests
         run: make test
 
-      - name: Static analysis
+      - name: Run vet
         run: make lint
 
-      - name: ARM64 static build
-        run: make arm64
+      - name: Build binaries
+        run: make build arm64

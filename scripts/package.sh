@@ -29,12 +29,14 @@ archive_root="${work_dir}/rtop-${version}-linux-arm64"
 install -d -m 0755 "${archive_root}"
 install -m 0755 "${binary}" "${archive_root}/rtop"
 install -m 0644 "${repo_root}/README.md" "${archive_root}/README.md"
+install -m 0644 "${repo_root}/README_EN.md" "${archive_root}/README_EN.md"
 tar -C "${work_dir}" -czf "${dist_dir}/${archive_name}" "rtop-${version}-linux-arm64"
 
 deb_root="${work_dir}/deb"
 install -d -m 0755 "${deb_root}/DEBIAN" "${deb_root}/usr/bin" "${deb_root}/usr/share/doc/rtop"
 install -m 0755 "${binary}" "${deb_root}/usr/bin/rtop"
 install -m 0644 "${repo_root}/README.md" "${deb_root}/usr/share/doc/rtop/README.md"
+install -m 0644 "${repo_root}/README_EN.md" "${deb_root}/usr/share/doc/rtop/README_EN.md"
 installed_size="$(du -sk "${deb_root}/usr" | awk '{print $1}')"
 cat >"${deb_root}/DEBIAN/control" <<EOF
 Package: rtop
