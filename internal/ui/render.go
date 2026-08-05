@@ -111,7 +111,10 @@ func (m Model) renderHeader() string {
 		status += "  " + warnStyle.Render(fmt.Sprintf("!%d", len(m.latest.Warnings)))
 	}
 	status = ansi.Truncate(status, m.width, "")
+	return lipgloss.NewStyle().Width(m.width).MaxWidth(m.width).Render(status) + "\n"
+}
 
+func (m Model) renderTabs() string {
 	tabs := []struct {
 		wide   string
 		narrow string
@@ -142,7 +145,7 @@ func (m Model) renderHeader() string {
 		tabLine = titleStyle.Render("["+current+"]") + mutedStyle.Render("  1-6 pages  ? help")
 	}
 	tabLine = ansi.Truncate(tabLine, m.width, "")
-	return lipgloss.NewStyle().Width(m.width).MaxWidth(m.width).Render(status+"\n"+tabLine) + "\n"
+	return lipgloss.NewStyle().Width(m.width).MaxWidth(m.width).Render(tabLine)
 }
 
 func (m Model) renderFooter() string {
@@ -152,12 +155,12 @@ func (m Model) renderFooter() string {
 		hint = "j/k scroll  esc close  q quit"
 	case m.page == pageProcesses:
 		hint = "j/k select  c CPU  m MEM  p paths  enter details  r refresh  ? help  q quit"
-	case m.page == pageAll || m.page == pageMemory:
+	case m.page == pageAll || m.page == pageCPU || m.page == pageMemory:
 		hint = "j/k scroll  p paths  r refresh  ? help  q quit"
 	default:
 		hint = "j/k scroll  r refresh  ? help  q quit"
 	}
-	return "\n" + ansi.Truncate(mutedStyle.Render(hint), m.width, "")
+	return "\n" + ansi.Truncate(mutedStyle.Render(hint), m.width, "") + "\n" + m.renderTabs()
 }
 
 func (m Model) renderBody(height int) string {
@@ -376,7 +379,19 @@ func (m Model) topProcessesCard(width, limit int, order processSort) string {
 }
 
 func (m Model) renderCPU(_ int) string {
-	return m.cpuCard(m.width) + "\n" + m.cpuContextCard(m.width)
+	cpu := m.cpuCard(m.width)
+	if m.width >= 88 {
+		leftWidth := (m.width - 2) / 2
+		rightWidth := m.width - leftWidth - 2
+		contextAndProcesses := lipgloss.JoinHorizontal(
+			lipgloss.Top,
+			m.cpuContextCard(leftWidth), "  ", m.topProcessesCard(rightWidth, 8, sortCPU),
+		)
+		return cpu + "\n" + contextAndProcesses
+	}
+	return cpu + "\n" +
+		m.cpuContextCard(m.width) + "\n" +
+		m.topProcessesCard(m.width, 8, sortCPU)
 }
 
 func (m Model) cpuContextCard(width int) string {

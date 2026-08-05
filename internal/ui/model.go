@@ -185,7 +185,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if key.Matches(message, m.keys.Paths) &&
-			(m.page == pageAll || m.page == pageMemory || m.page == pageProcesses) {
+			(m.page == pageAll || m.page == pageCPU || m.page == pageMemory || m.page == pageProcesses) {
 			m.showProcessPath = !m.showProcessPath
 			return m, nil
 		}
@@ -258,7 +258,7 @@ func (m Model) scopeCommand() tea.Cmd {
 func scopeForPage(current page) model.CollectionScope {
 	switch current {
 	case pageCPU:
-		return model.CollectCPU | model.CollectMemory | model.CollectThermals | model.CollectPower
+		return model.CollectCPU | model.CollectMemory | model.CollectThermals | model.CollectPower | model.CollectProcesses
 	case pageMemory:
 		return model.CollectMemory | model.CollectProcesses
 	case pageEngines:

@@ -36,7 +36,7 @@ The layout responds to terminal resizing down to 24 columns by 8 rows. Smaller
 windows show a compact resize hint instead of drawing clipped cards.
 
 - `1`: ALL board overview.
-- `2`: CPU load, frequency policy, thermal limits, cooling, power and fan detail.
+- `2`: CPU load, frequency policy, thermal limits, cooling, power, fans and CPU-heavy processes.
 - `3`: memory, CMA, PSI, zram, load and memory-heavy processes.
 - `4`: Rockchip engines, devfreq policy, runtime state, thermals, board power and fans.
 - `5`: process table.
