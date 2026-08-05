@@ -433,6 +433,123 @@ func TestCPUPageRendersPerCoreUsageGraph(t *testing.T) {
 	}
 }
 
+func TestCPUCardGroupsCoresAndShowsPolicyOnce(t *testing.T) {
+	now := time.Now()
+	policy := func(minimum, maximum float64) *model.FrequencyPolicy {
+		return &model.FrequencyPolicy{
+			Minimum:         model.AvailableMetric(minimum, "MHz", "min", now),
+			Maximum:         model.AvailableMetric(maximum, "MHz", "max", now),
+			HardwareMinimum: model.AvailableMetric(minimum, "MHz", "hw_min", now),
+			HardwareMaximum: model.AvailableMetric(maximum, "MHz", "hw_max", now),
+			Governor:        model.AvailableTextMetric("schedutil", "governor", now),
+		}
+	}
+	clusters := []struct {
+		name        string
+		first, last int
+		maximum     float64
+	}{
+		{name: "little", first: 0, last: 3, maximum: 1800},
+		{name: "middle", first: 4, last: 5, maximum: 2400},
+		{name: "big", first: 6, last: 7, maximum: 2400},
+	}
+	snapshot := testSnapshot()
+	snapshot.CPU.Cores = nil
+	for _, cluster := range clusters {
+		clusterPolicy := policy(408, cluster.maximum)
+		for id := cluster.first; id <= cluster.last; id++ {
+			snapshot.CPU.Cores = append(snapshot.CPU.Cores, model.CPUCore{
+				ID: id, Cluster: cluster.name,
+				Usage:     model.AvailableMetric(float64(10+id*8), "%", "/proc/stat", now),
+				Frequency: model.AvailableMetric(cluster.maximum, "MHz", "frequency", now),
+				Policy:    clusterPolicy,
+			})
+		}
+	}
+
+	uiModel := NewModel(make(chan model.Snapshot), nil)
+	uiModel.latest = snapshot
+	view := ansi.Strip(uiModel.cpuCard(100))
+	for _, expected := range []string{
+		"LITTLE · cpu0-3", "MIDDLE · cpu4-5", "BIG · cpu6-7",
+	} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("grouped CPU card is missing %q:\n%s", expected, view)
+		}
+	}
+	if count := strings.Count(view, "408–1800MHz · schedutil"); count != 1 {
+		t.Fatalf("little policy rendered %d times, want once:\n%s", count, view)
+	}
+	for id := range 8 {
+		core := fmt.Sprintf("cpu%d", id)
+		found := false
+		for _, line := range strings.Split(view, "\n") {
+			if strings.Contains(line, "│ "+core+" ") &&
+				strings.Contains(line, "[") && strings.Contains(line, "]") &&
+				strings.Contains(line, "MHz") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("grouped CPU card has no load/frequency row for %s:\n%s", core, view)
+		}
+	}
+}
+
+func TestCPUCardFallsBackToFrequencyPolicyGroups(t *testing.T) {
+	now := time.Now()
+	policy := func(maximum float64) *model.FrequencyPolicy {
+		return &model.FrequencyPolicy{
+			Minimum:  model.AvailableMetric(400, "MHz", "min", now),
+			Maximum:  model.AvailableMetric(maximum, "MHz", "max", now),
+			Governor: model.AvailableTextMetric("schedutil", "governor", now),
+		}
+	}
+	groups := groupCPUCores([]model.CPUCore{
+		{ID: 0, Policy: policy(1800)},
+		{ID: 1, Policy: policy(1800)},
+		{ID: 2, Policy: policy(2400)},
+	})
+	if len(groups) != 2 || groups[0].label != "POLICY 1" || groups[1].label != "POLICY 2" {
+		t.Fatalf("fallback policy groups = %#v", groups)
+	}
+	if got := cpuCoreRange(groups[0].cores); got != "cpu0-1" {
+		t.Fatalf("first policy core range = %q", got)
+	}
+}
+
+func TestCPUCoreRowsAndGroupHeadersFillAvailableWidth(t *testing.T) {
+	now := time.Now()
+	policy := &model.FrequencyPolicy{
+		Minimum:  model.AvailableMetric(408, "MHz", "min", now),
+		Maximum:  model.AvailableMetric(1800, "MHz", "max", now),
+		Governor: model.AvailableTextMetric("schedutil", "governor", now),
+	}
+	core := model.CPUCore{
+		ID: 0, Cluster: "little",
+		Usage:     model.AvailableMetric(42, "%", "/proc/stat", now),
+		Frequency: model.AvailableMetric(1800, "MHz", "frequency", now),
+		Policy:    policy,
+	}
+	for _, width := range []int{34, 52, 76, 96} {
+		row := renderCPUCore(core, width)
+		if got := ansi.StringWidth(row); got != width {
+			t.Fatalf("CPU core row width = %d, want %d: %q", got, width, ansi.Strip(row))
+		}
+		if !strings.HasSuffix(ansi.Strip(row), "1800MHz") {
+			t.Fatalf("CPU frequency is not right aligned: %q", ansi.Strip(row))
+		}
+	}
+
+	header := renderCPUGroupHeader(cpuCoreGroup{
+		label: "LITTLE", cores: []model.CPUCore{core}, policy: policy,
+	}, 76)
+	if got := ansi.StringWidth(header); got != 76 {
+		t.Fatalf("CPU group header width = %d, want 76: %q", got, ansi.Strip(header))
+	}
+}
+
 func TestCPUAndMemoryPagesRenderProcessRankings(t *testing.T) {
 	uiModel := NewModel(make(chan model.Snapshot), nil)
 	updated, _ := uiModel.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
@@ -464,6 +581,35 @@ func TestCPUAndMemoryPagesRenderProcessRankings(t *testing.T) {
 				t.Fatalf("page %d is missing %q after path toggle:\n%s", test.current, expected, view)
 			}
 		}
+	}
+}
+
+func TestMemoryPageUsesFullWidthRows(t *testing.T) {
+	uiModel := NewModel(make(chan model.Snapshot), nil)
+	updated, _ := uiModel.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	uiModel = updated.(Model)
+	updated, _ = uiModel.Update(snapshotMsg{snapshot: testSnapshot()})
+	uiModel = updated.(Model)
+
+	view := ansi.Strip(uiModel.renderMemory(40))
+	memoryLine, processLine := -1, -1
+	fullWidthCards := 0
+	for index, line := range strings.Split(view, "\n") {
+		switch {
+		case strings.Contains(line, "│ MEMORY"):
+			memoryLine = index
+		case strings.Contains(line, "│ TOP PROCESSES · MEMORY"):
+			processLine = index
+		}
+		if strings.HasPrefix(line, "╭") && ansi.StringWidth(line) == 100 {
+			fullWidthCards++
+		}
+	}
+	if memoryLine < 0 || processLine <= memoryLine {
+		t.Fatalf("memory cards are not arranged in top/bottom rows:\n%s", view)
+	}
+	if fullWidthCards != 2 {
+		t.Fatalf("full-width memory cards = %d, want 2:\n%s", fullWidthCards, view)
 	}
 }
 
@@ -518,8 +664,8 @@ func TestDetailPagesRenderDVFSPressureAndThermalControls(t *testing.T) {
 	uiModel = updated.(Model)
 
 	for currentPage, expected := range map[page][]string{
-		pageCPU:     {"limits", "schedutil", "board-fan"},
-		pageMemory:  {"CMA", "PSI memory", "ZRAM"},
+		pageCPU:     {"LITTLE · cpu0", "600–1800MHz", "schedutil", "board-fan"},
+		pageMemory:  {"CMA", "PSI avg10", "ZRAM"},
 		pageEngines: {"power active", "simple_ondemand", "passive", "COOLING", "POWER & FANS", "board-fan"},
 	} {
 		uiModel.page = currentPage

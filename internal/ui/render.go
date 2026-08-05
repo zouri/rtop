@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -265,24 +266,116 @@ func (m Model) cpuCard(width int) string {
 		builder.WriteString("\nHistory ")
 		builder.WriteString(sparkline(m.cpuHistory, max(4, inner-8)))
 	}
-	for _, core := range m.latest.CPU.Cores {
-		builder.WriteString("\n")
-		label := fmt.Sprintf("cpu%d", core.ID)
-		if core.Cluster != "" && inner >= 40 {
-			label += " " + core.Cluster
-		}
-		if inner >= 48 {
-			barWidth := max(8, inner-32)
-			builder.WriteString(fmt.Sprintf("%-13s %s %7s  %8s", label, progress(core.Usage, barWidth), formatMetricCompact(core.Usage, 1), formatMetricCompact(core.Frequency, 0)))
-		} else {
-			builder.WriteString(fmt.Sprintf("%-13s %7s  %8s", label, formatMetricCompact(core.Usage, 1), formatMetricCompact(core.Frequency, 0)))
-			builder.WriteString("\n  " + progress(core.Usage, max(8, inner-2)))
-		}
-		if summary := frequencyPolicySummary(core.Policy); summary != "" {
-			builder.WriteString("\n" + truncateText("  limits "+summary, inner))
+	for _, group := range groupCPUCores(m.latest.CPU.Cores) {
+		builder.WriteString("\n\n")
+		builder.WriteString(renderCPUGroupHeader(group, inner))
+		for _, core := range group.cores {
+			builder.WriteString("\n")
+			builder.WriteString(renderCPUCore(core, inner))
 		}
 	}
 	return panel(builder.String(), width)
+}
+
+type cpuCoreGroup struct {
+	label  string
+	cores  []model.CPUCore
+	policy *model.FrequencyPolicy
+}
+
+func groupCPUCores(cores []model.CPUCore) []cpuCoreGroup {
+	groups := make([]cpuCoreGroup, 0)
+	indexes := make(map[string]int)
+	policyCount := 0
+	for _, core := range cores {
+		key := ""
+		label := ""
+		policySummary := cpuFrequencyPolicySummary(core.Policy)
+		switch {
+		case core.Cluster != "":
+			cluster := strings.ToLower(core.Cluster)
+			key = "cluster:" + cluster
+			if cluster == "single" {
+				label = "CPU CORES"
+			} else {
+				label = strings.ToUpper(core.Cluster)
+			}
+		case policySummary != "":
+			key = "policy:" + policySummary
+		default:
+			key = "unclassified"
+			label = "CPU CORES"
+		}
+
+		index, ok := indexes[key]
+		if !ok {
+			if label == "" {
+				policyCount++
+				label = fmt.Sprintf("POLICY %d", policyCount)
+			}
+			index = len(groups)
+			indexes[key] = index
+			groups = append(groups, cpuCoreGroup{label: label, policy: core.Policy})
+		}
+		groups[index].cores = append(groups[index].cores, core)
+	}
+	return groups
+}
+
+func renderCPUGroupHeader(group cpuCoreGroup, width int) string {
+	title := group.label
+	if cores := cpuCoreRange(group.cores); cores != "" {
+		title += " · " + cores
+	}
+	policy := cpuFrequencyPolicySummary(group.policy)
+	if policy == "" {
+		return titleStyle.Render(truncateText(title, width))
+	}
+	gap := width - ansi.StringWidth(title) - ansi.StringWidth(policy)
+	if gap >= 2 {
+		return titleStyle.Render(title) + strings.Repeat(" ", gap) + mutedStyle.Render(policy)
+	}
+	return titleStyle.Render(truncateText(title, width)) +
+		"\n" + mutedStyle.Render(truncateText("  "+policy, width))
+}
+
+func renderCPUCore(core model.CPUCore, width int) string {
+	label := fmt.Sprintf("cpu%d", core.ID)
+	usage := formatMetricCompact(core.Usage, 1)
+	frequency := formatMetricCompact(core.Frequency, 0)
+	if width >= 34 {
+		barWidth := min(max(8, width/2), width-24)
+		left := fmt.Sprintf("%-5s %s %7s", label, progress(core.Usage, barWidth), usage)
+		gap := max(2, width-ansi.StringWidth(left)-ansi.StringWidth(frequency))
+		return left + strings.Repeat(" ", gap) + frequency
+	}
+	metrics := truncateText(fmt.Sprintf("%-5s %7s  %8s", label, usage, frequency), width)
+	return metrics + "\n  " + progress(core.Usage, max(8, width-2))
+}
+
+func cpuCoreRange(cores []model.CPUCore) string {
+	if len(cores) == 0 {
+		return ""
+	}
+	ids := make([]int, len(cores))
+	for index, core := range cores {
+		ids[index] = core.ID
+	}
+	sort.Ints(ids)
+	parts := make([]string, 0, len(ids))
+	for start := 0; start < len(ids); {
+		end := start
+		for end+1 < len(ids) && ids[end+1] == ids[end]+1 {
+			end++
+		}
+		if start == end {
+			parts = append(parts, fmt.Sprintf("cpu%d", ids[start]))
+		} else {
+			parts = append(parts, fmt.Sprintf("cpu%d-%d", ids[start], ids[end]))
+		}
+		start = end + 1
+	}
+	return strings.Join(parts, ",")
 }
 
 func (m Model) memoryCardCompact(width int) string {
@@ -433,14 +526,6 @@ func (m Model) cpuContextCard(width int) string {
 }
 
 func (m Model) renderMemory(_ int) string {
-	if m.width >= 88 {
-		leftWidth := (m.width - 2) / 2
-		rightWidth := m.width - leftWidth - 2
-		return lipgloss.JoinHorizontal(
-			lipgloss.Top,
-			m.memoryDetailCard(leftWidth), "  ", m.topProcessesCard(rightWidth, 8, sortMemory),
-		)
-	}
 	return m.memoryDetailCard(m.width) + "\n" + m.topProcessesCard(m.width, 8, sortMemory)
 }
 
@@ -854,6 +939,25 @@ func frequencyPolicySummary(policy *model.FrequencyPolicy) string {
 	}
 	if value := frequencyRange(policy.HardwareMinimum, policy.HardwareMaximum); value != "" {
 		parts = append(parts, "hw "+value)
+	}
+	if governor := formatTextMetricValue(policy.Governor); governor != "" {
+		parts = append(parts, governor)
+	}
+	return strings.Join(parts, " · ")
+}
+
+func cpuFrequencyPolicySummary(policy *model.FrequencyPolicy) string {
+	if policy == nil {
+		return ""
+	}
+	parts := make([]string, 0, 3)
+	activeRange := frequencyRange(policy.Minimum, policy.Maximum)
+	hardwareRange := frequencyRange(policy.HardwareMinimum, policy.HardwareMaximum)
+	if activeRange != "" {
+		parts = append(parts, activeRange)
+	}
+	if hardwareRange != "" && hardwareRange != activeRange {
+		parts = append(parts, "hw "+hardwareRange)
 	}
 	if governor := formatTextMetricValue(policy.Governor); governor != "" {
 		parts = append(parts, governor)
