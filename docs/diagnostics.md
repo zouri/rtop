@@ -29,7 +29,8 @@ lines or file contents.
 
 ### debugfs is not mounted
 
-Generic metrics and aggregate GPU/NPU/DDR devfreq metrics may still work.
+Generic metrics, aggregate GPU/NPU/DDR devfreq metrics, and procfs-backed RGA
+load metrics may still work.
 Per-core RKNPU load commonly requires `/sys/kernel/debug/rknpu/load`.
 Mounting debugfs requires administrative privileges and is never performed by
 rtop.

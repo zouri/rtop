@@ -413,9 +413,16 @@ func (m Model) overviewEnginesCard(width int) string {
 	for _, accelerator := range m.latest.Accelerators {
 		if inner >= 28 {
 			nameWidth := max(7, min(12, inner-19))
-			builder.WriteString(fmt.Sprintf("\n%-*s %8s  %8s", nameWidth, truncateText(accelerator.Name, nameWidth), formatMetricCompact(accelerator.Usage, 0), formatMetricCompact(accelerator.Frequency, 0)))
+			if accelerator.Type == "rga" {
+				builder.WriteString(fmt.Sprintf("\n%-*s %8s", nameWidth, truncateText(accelerator.Name, nameWidth), formatMetricCompact(accelerator.Usage, 0)))
+			} else {
+				builder.WriteString(fmt.Sprintf("\n%-*s %8s  %8s", nameWidth, truncateText(accelerator.Name, nameWidth), formatMetricCompact(accelerator.Usage, 0), formatMetricCompact(accelerator.Frequency, 0)))
+			}
 		} else {
-			line := fmt.Sprintf("%s  %s  %s", accelerator.Name, formatMetricCompact(accelerator.Usage, 0), formatMetricCompact(accelerator.Frequency, 0))
+			line := fmt.Sprintf("%s  %s", accelerator.Name, formatMetricCompact(accelerator.Usage, 0))
+			if accelerator.Type != "rga" {
+				line += "  " + formatMetricCompact(accelerator.Frequency, 0)
+			}
 			builder.WriteString("\n" + truncateText(line, inner))
 		}
 	}
@@ -576,7 +583,7 @@ func (m Model) renderEngines(_ int) string {
 	var builder strings.Builder
 	builder.WriteString(titleStyle.Render("ROCKCHIP ENGINES"))
 	if len(m.latest.Accelerators) == 0 {
-		builder.WriteString("\n" + mutedStyle.Render("No GPU, NPU or DDR providers detected"))
+		builder.WriteString("\n" + mutedStyle.Render("No GPU, NPU, DDR or RGA providers detected"))
 		builder.WriteString("\n" + mutedStyle.Render("Run `rtop doctor` for source and permission diagnostics"))
 		return builder.String()
 	}
@@ -595,13 +602,21 @@ func enginePanel(accelerator model.Accelerator, history []float64, width int) st
 	inner := max(8, width-4)
 	var builder strings.Builder
 	builder.WriteString(titleStyle.Render(accelerator.Name))
-	builder.WriteString(fmt.Sprintf("  load %s  frequency %s", formatMetric(accelerator.Usage, 1), formatMetric(accelerator.Frequency, 0)))
+	builder.WriteString(fmt.Sprintf("  load %s", formatMetric(accelerator.Usage, 1)))
+	if accelerator.Frequency.Status != model.Unsupported || accelerator.Type != "rga" {
+		builder.WriteString(fmt.Sprintf("  frequency %s", formatMetric(accelerator.Frequency, 0)))
+	}
 	metadata := make([]string, 0, 2)
 	if runtime := formatTextMetricValue(accelerator.RuntimeStatus); runtime != "" {
 		metadata = append(metadata, "power "+runtime)
 	}
 	if policy := frequencyPolicySummary(accelerator.Policy); policy != "" {
 		metadata = append(metadata, "limits "+policy)
+	}
+	if accelerator.DriverVersion != nil {
+		if version := formatTextMetricValue(*accelerator.DriverVersion); version != "" {
+			metadata = append(metadata, version)
+		}
 	}
 	if len(metadata) > 0 {
 		builder.WriteString("\n" + truncateText(strings.Join(metadata, " · "), inner))
@@ -620,11 +635,19 @@ func enginePanel(accelerator model.Accelerator, history []float64, width int) st
 			if index > 0 {
 				builder.WriteString("  ")
 			}
-			builder.WriteString(fmt.Sprintf("C%d %s", core.ID, formatMetric(core.Usage, 1)))
+			label := fmt.Sprintf("C%d", core.ID)
+			if core.Name != "" {
+				label = core.Name
+			}
+			builder.WriteString(fmt.Sprintf("%s %s", label, formatMetric(core.Usage, 1)))
 		}
 	} else {
 		for _, core := range accelerator.Cores {
-			builder.WriteString(fmt.Sprintf("\nCore %-2d  %-12s %s", core.ID, formatMetric(core.Usage, 1), statusText(core.Usage)))
+			label := fmt.Sprintf("Core %d", core.ID)
+			if core.Name != "" {
+				label = core.Name
+			}
+			builder.WriteString(fmt.Sprintf("\n%-16s %-12s %s", truncateText(label, 16), formatMetric(core.Usage, 1), statusText(core.Usage)))
 		}
 	}
 	return panel(builder.String(), width)
@@ -638,6 +661,8 @@ func (m Model) engineHistory(acceleratorType string) []float64 {
 		return m.npuHistory
 	case "ddr":
 		return m.ddrHistory
+	case "rga":
+		return m.rgaHistory
 	default:
 		return nil
 	}
@@ -853,8 +878,12 @@ func (m Model) renderInfo(_ int) string {
 	}
 	builder.WriteString("\nFans         " + fanStatus)
 	for _, accelerator := range m.latest.Accelerators {
-		builder.WriteString(fmt.Sprintf("\n%-13s %s", strings.ToUpper(accelerator.Type), statusText(accelerator.Frequency)))
-		if accelerator.RuntimeStatus.Status != "" {
+		metric := accelerator.Frequency
+		if accelerator.Type == "rga" {
+			metric = accelerator.Usage
+		}
+		builder.WriteString(fmt.Sprintf("\n%-13s %s", strings.ToUpper(accelerator.Type), statusText(metric)))
+		if accelerator.Type != "rga" && accelerator.RuntimeStatus.Status != "" {
 			builder.WriteString(fmt.Sprintf(" · %s", formatTextMetricCompact(accelerator.RuntimeStatus)))
 		}
 	}

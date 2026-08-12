@@ -56,6 +56,7 @@ type Model struct {
 	gpuHistory    []float64
 	npuHistory    []float64
 	ddrHistory    []float64
+	rgaHistory    []float64
 
 	keys keyMap
 	help help.Model
@@ -422,13 +423,14 @@ func (m *Model) addHistory(snapshot model.Snapshot) {
 		m.memoryHistory = appendHistory(m.memoryHistory, memoryPercent(snapshot.Memory))
 	}
 	if scope.Includes(model.CollectAccelerators) {
-		values := map[string]float64{"gpu": -1, "npu": -1, "ddr": -1}
+		values := map[string]float64{"gpu": -1, "npu": -1, "ddr": -1, "rga": -1}
 		for _, accelerator := range snapshot.Accelerators {
 			values[accelerator.Type] = metricNumber(accelerator.Usage)
 		}
 		m.gpuHistory = appendHistory(m.gpuHistory, values["gpu"])
 		m.npuHistory = appendHistory(m.npuHistory, values["npu"])
 		m.ddrHistory = appendHistory(m.ddrHistory, values["ddr"])
+		m.rgaHistory = appendHistory(m.rgaHistory, values["rga"])
 	}
 }
 

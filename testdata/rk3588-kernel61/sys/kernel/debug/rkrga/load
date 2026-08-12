@@ -1,0 +1,14 @@
+num of scheduler = 3
+================= load ==================
+scheduler[0]: rga3_core0
+	 load = 18%
+-----------------------------------
+scheduler[1]: rga3_core1
+	 load = 24%
+-----------------------------------
+scheduler[2]: rga2
+	 load = 6%
+-----------------------------------
+=========================================
+<session>  <status>  <tgid>  <process>
+1          active    1234    compositor

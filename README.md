@@ -3,13 +3,18 @@
 简体中文 | [English](README_EN.md)
 
 rtop 是面向 Rockchip Linux 平台的只读终端系统监视器。当前版本提供
-Linux 通用指标采集、进程排行、交互式终端界面，以及通过 devfreq 动态发现的
-RK3588 GPU、NPU 和 DDR 指标。当内核提供相应接口时，还可显示 CPU/devfreq
+Linux 通用指标采集、进程排行、交互式终端界面、通过 devfreq 动态发现的
+RK3588 GPU/NPU/DDR 指标，以及 RGA scheduler 负载。当内核提供相应接口时，还可显示 CPU/devfreq
 频率策略、上下限与调速器、运行时电源状态、温控点与冷却状态、PSI 压力、
 CMA、zram、hwmon 电源轨和风扇状态。
 
 当 RKNPU debugfs 节点可读时，rtop 会显示各个 NPU 核心的负载；无法读取时，
 对应核心会明确显示 `permission_denied`，不会将缺失数据误报为 0。
+
+当 Rockchip 统一 RGA 驱动暴露 `/sys/kernel/debug/rkrga/load` 或
+`/proc/rkrga/load` 时，rtop 会显示各 scheduler（例如 RGA2、RGA3 core）的
+负载、它们的算术平均负载，并读取同目录的驱动版本。旧 RGA/RGA2 驱动通常没有负载
+统计接口，此时会明确显示 `unsupported`，不会根据队列长度估算利用率。
 
 ## 构建
 

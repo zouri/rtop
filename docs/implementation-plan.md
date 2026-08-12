@@ -42,6 +42,7 @@ rtop 是面向 Rockchip Linux 平台的终端系统监控工具，目标体验�
 - Mali GPU 使用率和频率。
 - RKNPU 各核心使用率和频率。
 - GPU、NPU、DDR/DMC 当前频率、运行电源状态和频率策略。
+- RGA 整体及各 scheduler 使用率和驱动版本（内核暴露 rkrga load 时）。
 - 进程 CPU 和内存排名。
 - 实时 TUI。
 - JSON 快照输出。
@@ -56,7 +57,8 @@ rtop 是面向 Rockchip Linux 平台的终端系统监控工具，目标体验�
 - 每进程 GPU/NPU 使用率。
 - Web 管理界面。
 - 后台守护进程。
-- VPU/RGA 精确使用率。
+- VPU 精确使用率。
+- 每进程 RGA 使用率。
 
 这些功能推迟到后续版本，以确保第一版保持只读、稳定和可移植。
 
@@ -103,7 +105,7 @@ rtop/
 │   ├── sysfs/                # 可测试的文件访问封装
 │   ├── platform/             # Linux/Rockchip 平台识别
 │   ├── collector/
-│   │   ├── accelerator/      # GPU/NPU/DDR 共用 devfreq 扫描
+│   │   ├── accelerator/      # GPU/NPU/DDR devfreq 与 RGA 负载
 │   │   ├── cpu/
 │   │   ├── memory/
 │   │   ├── power/              # hwmon 电压、电流、功率、能量与风扇
@@ -240,10 +242,10 @@ doctor 只给出诊断信息和修复建议，不自动 mount、chmod 或修改�
 
 界面定位参考 Jetson 平台的 jtop，采用 ALL 总览加硬件域详情：
 
-- ALL：CPU、内存、GPU、NPU、DDR、最高温度、告警和 Top 进程。
+- ALL：CPU、内存、GPU、NPU、DDR、RGA、最高温度、告警和 Top 进程。
 - CPU：总体与单核负载、频率、频率策略、系统负载、热管理、功耗和风扇状态。
 - MEMORY：内存、Swap、CMA、PSI、zram、负载历史和高内存进程。
-- ENGINES：GPU、NPU、DDR 的负载、频率、频率策略、运行电源状态、历史曲线、温度、板载功耗及风扇。
+- ENGINES：GPU、NPU、DDR、RGA 的负载和历史曲线，以及可用的频率、频率策略、运行电源状态、驱动版本、温度、板载功耗及风扇。
 - PROCESSES：进程 CPU、内存和线程数排名，并可查看选中进程详情。
 - INFO：SoC、板卡、内核、驱动、指标来源和诊断信息。
 - HELP：使用覆盖层展示，不离开当前页面，也不改变采集范围。
@@ -265,7 +267,7 @@ UI 必须支持窄终端降级布局，不能假设固定终端尺寸。
 
 推荐采样周期：
 
-- CPU、内存、GPU、NPU、DDR、温度：1 秒。
+- CPU、内存、GPU、NPU、DDR、RGA、温度：1 秒。
 - 进程列表：2 秒。
 - 风扇和功耗：1～2 秒。
 - 系统、板卡和驱动信息：启动时读取一次。
@@ -321,7 +323,7 @@ UI 必须支持窄终端降级布局，不能假设固定终端尺寸。
 - q 和 Ctrl+C 能安全退出。
 - 连续运行一小时无明显内存增长或 goroutine 泄漏。
 
-### 阶段三：RK3588 GPU、NPU 和 DDR
+### 阶段三：RK3588 GPU、NPU、DDR 和 RGA
 
 预计时间：1～2 周。
 
@@ -331,12 +333,13 @@ UI 必须支持窄终端降级布局，不能假设固定终端尺寸。
 - 扫描并分类 devfreq 设备。
 - 用一个加速器采集器读取 Mali GPU、RKNPU 和 DMC/DDR。
 - 解析 RKNPU 多核心负载。
+- 探测 debugfs/procfs 的 rkrga load 并解析多 scheduler 负载。
 - 兼容常见 5.10 和 6.1 BSP 格式。
 - 增加 Engines 页面。
 
 验收标准：
 
-- RK3588 BSP 5.10 可展示 GPU、NPU、DDR 可用指标。
+- RK3588 BSP 5.10 可展示 GPU、NPU、DDR 和内核可用时的 RGA 指标。
 - 常见 RK3588 6.1 BSP 可正常识别或明确降级。
 - NPU 多核心指标分别展示。
 - 无 debugfs 权限时，UI 展示 PermissionDenied 而不是 0%。
@@ -416,7 +419,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" ./cmd/
 
 - v0.1.0：RK3588 MVP。
 - v0.2.0：RK3566/RK3568/RK3576 扩展。
-- v0.3.0：DDR 带宽、VPU/RGA、媒体内存和导出能力增强。
+- v0.3.0：DDR 带宽、VPU、RGA 兼容性、媒体内存和导出能力增强。
 - v1.0.0：接口稳定且主要平台经过真机验证。
 
 ## 14. 已知风险及处理策略
@@ -435,7 +438,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" ./cmd/
 
 ### 14.3 部分指标本身不可获得
 
-风险：某些驱动不暴露 VPU/RGA 使用率或每进程 GPU/NPU 使用率。
+风险：旧 RGA/RGA2 驱动不暴露负载，某些驱动不暴露 VPU 或每进程 GPU/NPU/RGA 使用率。
 
 策略：支持矩阵明确标注，不通过估算数据冒充真实硬件指标。
 
@@ -449,7 +452,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" ./cmd/
 
 v0.1.0 达到以下条件后可以发布：
 
-- RK3588 上 CPU、内存、温度、GPU、NPU 和 DDR 主要指标可用。
+- RK3588 上 CPU、内存、温度、GPU、NPU、DDR 和内核暴露时的 RGA 主要指标可用。
 - 可用时展示 DVFS 策略、PSI、CMA、zram、thermal trip 和 cooling state。
 - TUI、info、snapshot 和 doctor 命令完整可用。
 - 普通用户环境能运行并正确表达权限限制。
@@ -458,4 +461,4 @@ v0.1.0 达到以下条件后可以发布：
 - 连续运行测试没有明显泄漏或界面冻结。
 - ARM64 发布包可以在没有 Go 环境的设备上直接运行。
 
-完成 v0.1.0 后，再按 RK3566/RK3568、RK3576、DDR 带宽、VPU/RGA、媒体内存和外部指标导出的顺序扩展。
+完成 v0.1.0 后，再按 RK3566/RK3568、RK3576、DDR 带宽、VPU、RGA 驱动兼容性、媒体内存和外部指标导出的顺序扩展。

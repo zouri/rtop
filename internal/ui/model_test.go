@@ -44,8 +44,8 @@ func TestHistoryIsBounded(t *testing.T) {
 	for range 150 {
 		uiModel.addHistory(testSnapshot())
 	}
-	if len(uiModel.cpuHistory) != 120 || len(uiModel.memoryHistory) != 120 || len(uiModel.gpuHistory) != 120 {
-		t.Fatalf("history lengths cpu=%d memory=%d gpu=%d", len(uiModel.cpuHistory), len(uiModel.memoryHistory), len(uiModel.gpuHistory))
+	if len(uiModel.cpuHistory) != 120 || len(uiModel.memoryHistory) != 120 || len(uiModel.gpuHistory) != 120 || len(uiModel.rgaHistory) != 120 {
+		t.Fatalf("history lengths cpu=%d memory=%d gpu=%d rga=%d", len(uiModel.cpuHistory), len(uiModel.memoryHistory), len(uiModel.gpuHistory), len(uiModel.rgaHistory))
 	}
 }
 
@@ -146,7 +146,7 @@ func TestPageCollectionScopesAndNotifications(t *testing.T) {
 func TestHistoryIgnoresSnapshotsWithoutTrackedMetrics(t *testing.T) {
 	uiModel := NewModel(make(chan model.Snapshot), nil)
 	uiModel.addHistory(model.Snapshot{})
-	if len(uiModel.cpuHistory) != 0 || len(uiModel.memoryHistory) != 0 || len(uiModel.gpuHistory) != 0 {
+	if len(uiModel.cpuHistory) != 0 || len(uiModel.memoryHistory) != 0 || len(uiModel.gpuHistory) != 0 || len(uiModel.rgaHistory) != 0 {
 		t.Fatalf("unexpected history for empty snapshot")
 	}
 }
@@ -171,7 +171,7 @@ func TestSparseSnapshotsRetainLastValuesFromOtherPages(t *testing.T) {
 	if got := metricNumber(uiModel.latest.CPU.Overall); got != 25 {
 		t.Fatalf("CPU value after process-only snapshot = %v", got)
 	}
-	if len(uiModel.latest.Accelerators) != 2 {
+	if len(uiModel.latest.Accelerators) != 3 {
 		t.Fatalf("accelerators after process-only snapshot = %d", len(uiModel.latest.Accelerators))
 	}
 }
@@ -347,7 +347,7 @@ func TestStandardTerminalOverviewIncludesEngines(t *testing.T) {
 	updated, _ = uiModel.Update(snapshotMsg{snapshot: testSnapshot()})
 	uiModel = updated.(Model)
 	view := ansi.Strip(uiModel.View())
-	for _, expected := range []string{"CPU", "c0", "MEMORY", "TOP PROCESSES", "Mali GPU", "RKNPU"} {
+	for _, expected := range []string{"CPU", "c0", "MEMORY", "TOP PROCESSES", "Mali GPU", "RKNPU", "Rockchip RGA"} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("overview is missing %q:\n%s", expected, view)
 		}
@@ -666,7 +666,7 @@ func TestDetailPagesRenderDVFSPressureAndThermalControls(t *testing.T) {
 	for currentPage, expected := range map[page][]string{
 		pageCPU:     {"LITTLE · cpu0", "600–1800MHz", "schedutil", "board-fan"},
 		pageMemory:  {"CMA", "PSI avg10", "ZRAM"},
-		pageEngines: {"power active", "simple_ondemand", "passive", "COOLING", "POWER & FANS", "board-fan"},
+		pageEngines: {"power active", "simple_ondemand", "Rockchip RGA", "rga3", "rga2", "passive", "COOLING", "POWER & FANS", "board-fan"},
 	} {
 		uiModel.page = currentPage
 		view := ansi.Strip(uiModel.View())
@@ -775,6 +775,15 @@ func testSnapshot() model.Snapshot {
 				Cores: []model.AcceleratorCore{{
 					ID: 0, Usage: model.AvailableMetric(40, "%", "/sys/debug/rknpu/load", now),
 				}},
+			},
+			{
+				Name: "Rockchip RGA", Type: "rga",
+				Usage:     model.AvailableMetric(30, "%", "/sys/kernel/debug/rkrga/load", now),
+				Frequency: model.MissingMetric(model.Unsupported, "MHz", "/sys/kernel/debug/rkrga/load", "not exposed", now),
+				Cores: []model.AcceleratorCore{
+					{ID: 0, Name: "rga3", Usage: model.AvailableMetric(40, "%", "/sys/kernel/debug/rkrga/load", now)},
+					{ID: 1, Name: "rga2", Usage: model.AvailableMetric(20, "%", "/sys/kernel/debug/rkrga/load", now)},
+				},
 			},
 		},
 		Warnings: []model.Warning{},

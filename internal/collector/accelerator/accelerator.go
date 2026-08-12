@@ -20,9 +20,19 @@ const (
 	gpuType = "gpu"
 	npuType = "npu"
 	ddrType = "ddr"
+	rgaType = "rga"
 )
 
 var coreLoadPattern = regexp.MustCompile(`(?i)core\s*([0-9]+)\s*(?:load\s*)?[:=]\s*([0-9]+(?:\.[0-9]+)?)\s*%?`)
+var rgaLoadPattern = regexp.MustCompile(`(?mi)^[ \t]*scheduler\s*\[\s*([0-9]+)\s*\]\s*:\s*([^\r\n]+)\r?\n[ \t]*load\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*%`)
+var rgaSchedulerCountPattern = regexp.MustCompile(`(?mi)^[ \t]*num of scheduler\s*=\s*([0-9]+)[ \t]*$`)
+
+// The unified Rockchip RGA driver exposes the same read-only load report under
+// debugfs or procfs depending on CONFIG_ROCKCHIP_RGA_{DEBUG,PROC}_FS.
+var rgaLoadCandidates = []string{
+	"/sys/kernel/debug/rkrga/load",
+	"/proc/rkrga/load",
+}
 
 type device struct {
 	path   string
@@ -59,6 +69,8 @@ type Collector struct {
 	loadSources      map[string]cachedMetricSource
 	frequencySources map[string]cachedMetricSource
 	frequencyRanges  map[string]cachedFrequencyRange
+	rgaLoadSource    string
+	rgaLoadMissing   *model.Metric
 	mu               sync.Mutex
 }
 
@@ -95,12 +107,150 @@ func (c *Collector) Collect() ([]model.Accelerator, []model.Warning) {
 	gpuInfo, gpuWarnings := c.collectDevice(gpu, hasGPU, gpuType, "Mali GPU", timestamp)
 	npuInfo, npuWarnings := c.collectNPU(npu, hasNPU, timestamp)
 	ddrInfo, ddrWarnings := c.collectDevice(ddr, hasDDR, ddrType, "DDR/DMC", timestamp)
+	rgaInfo, rgaWarnings := c.collectRGA(timestamp)
 
 	warnings := append([]model.Warning{}, c.probeWarnings...)
 	warnings = append(warnings, gpuWarnings...)
 	warnings = append(warnings, npuWarnings...)
 	warnings = append(warnings, ddrWarnings...)
-	return []model.Accelerator{gpuInfo, npuInfo, ddrInfo}, warnings
+	warnings = append(warnings, rgaWarnings...)
+	return []model.Accelerator{gpuInfo, npuInfo, ddrInfo, rgaInfo}, warnings
+}
+
+func (c *Collector) collectRGA(timestamp time.Time) (model.Accelerator, []model.Warning) {
+	usage, cores := c.readRGALoad(timestamp)
+	source := usage.Source
+	if source == "" {
+		source = rgaLoadCandidates[0]
+	}
+	base := filepath.Dir(source)
+	versionPath := filepath.Join(base, "driver_version")
+	version := model.MissingTextMetric(model.Unsupported, versionPath, "RGA load interface was not discovered", timestamp)
+	if usage.Status == model.Unsupported {
+		// A missing optional version node should not make an otherwise absent RGA
+		// provider look partially detected.
+		version = model.MissingTextMetric(model.Unsupported, versionPath, "RGA load interface was not discovered", timestamp)
+	} else {
+		version = readTextMetric(c.fs, versionPath, timestamp)
+	}
+	frequency := model.MissingMetric(
+		model.Unsupported, "MHz", source,
+		"RGA driver does not expose a devfreq frequency metric", timestamp,
+	)
+	runtimeStatus := model.MissingTextMetric(
+		model.Unsupported, source,
+		"RGA load interface does not expose a runtime power state", timestamp,
+	)
+	info := model.Accelerator{
+		Name: "Rockchip RGA", Type: rgaType, Usage: usage, Frequency: frequency,
+		RuntimeStatus: runtimeStatus, DriverVersion: &version, Cores: cores,
+	}
+	warnings := metricWarnings(rgaType, usage)
+	if version.Status == model.PermissionDenied || version.Status == model.Unavailable {
+		warnings = append(warnings, model.Warning{
+			Component: rgaType,
+			Message:   version.Source + ": " + version.Error,
+		})
+	}
+	return info, warnings
+}
+
+func (c *Collector) readRGALoad(timestamp time.Time) (model.Metric, []model.AcceleratorCore) {
+	if c.rgaLoadSource != "" {
+		return readRGALoadSource(c.fs, c.rgaLoadSource, timestamp)
+	}
+	if c.rgaLoadMissing != nil {
+		return metricAt(*c.rgaLoadMissing, timestamp), nil
+	}
+
+	var bestErr error
+	bestSource := rgaLoadCandidates[0]
+	for _, path := range rgaLoadCandidates {
+		data, err := c.fs.ReadFile(path)
+		if err != nil {
+			if bestErr == nil ||
+				(sysfs.StatusForError(bestErr) != model.PermissionDenied &&
+					sysfs.StatusForError(err) == model.PermissionDenied) {
+				bestErr, bestSource = err, path
+			}
+			continue
+		}
+		loads, parseErr := parseRGALoad(data)
+		if parseErr != nil {
+			metric := model.MissingMetric(model.Unavailable, "%", path, parseErr.Error(), timestamp)
+			c.rgaLoadSource = path
+			return metric, nil
+		}
+		c.rgaLoadSource = path
+		return aggregateNamedCores(loads, path, timestamp)
+	}
+	metric := missingForError(bestErr, "%", bestSource, timestamp)
+	c.rgaLoadMissing = &metric
+	return metric, nil
+}
+
+func readRGALoadSource(systemFS sysfs.SystemFS, path string, timestamp time.Time) (model.Metric, []model.AcceleratorCore) {
+	data, err := systemFS.ReadFile(path)
+	if err != nil {
+		return missingForError(err, "%", path, timestamp), nil
+	}
+	loads, err := parseRGALoad(data)
+	if err != nil {
+		return model.MissingMetric(model.Unavailable, "%", path, err.Error(), timestamp), nil
+	}
+	return aggregateNamedCores(loads, path, timestamp)
+}
+
+func parseRGALoad(data []byte) ([]model.AcceleratorCore, error) {
+	matches := rgaLoadPattern.FindAllStringSubmatch(string(data), -1)
+	if len(matches) == 0 {
+		return nil, errors.New("no RGA scheduler load values found")
+	}
+	if countMatch := rgaSchedulerCountPattern.FindSubmatch(data); countMatch != nil {
+		count, err := strconv.Atoi(string(countMatch[1]))
+		if err != nil {
+			return nil, fmt.Errorf("invalid RGA scheduler count %q: %w", countMatch[1], err)
+		}
+		if count != len(matches) {
+			return nil, fmt.Errorf("RGA driver declared %d schedulers but exposed %d load values", count, len(matches))
+		}
+	}
+	cores := make([]model.AcceleratorCore, 0, len(matches))
+	seen := make(map[int]struct{}, len(matches))
+	for _, match := range matches {
+		id, err := strconv.Atoi(match[1])
+		if err != nil {
+			return nil, fmt.Errorf("invalid RGA scheduler id %q: %w", match[1], err)
+		}
+		if _, exists := seen[id]; exists {
+			return nil, fmt.Errorf("duplicate RGA scheduler id %d", id)
+		}
+		load, err := strconv.ParseFloat(match[3], 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid RGA scheduler %d load %q: %w", id, match[3], err)
+		}
+		if load < 0 || load > 100 {
+			return nil, fmt.Errorf("RGA scheduler %d load %.2f is outside 0..100", id, load)
+		}
+		seen[id] = struct{}{}
+		cores = append(cores, model.AcceleratorCore{ID: id, Name: strings.TrimSpace(match[2])})
+		cores[len(cores)-1].Usage = model.AvailableMetric(load, "%", "", time.Time{})
+	}
+	sort.Slice(cores, func(i, j int) bool { return cores[i].ID < cores[j].ID })
+	return cores, nil
+}
+
+func aggregateNamedCores(cores []model.AcceleratorCore, source string, timestamp time.Time) (model.Metric, []model.AcceleratorCore) {
+	var total float64
+	for index := range cores {
+		cores[index].Usage.Source = source
+		cores[index].Usage.Timestamp = timestamp
+		total += *cores[index].Usage.Value
+	}
+	// RGA schedulers can be occupied independently. Match the NPU core model by
+	// reporting their arithmetic mean as the aggregate engine utilization while
+	// preserving every scheduler's raw percentage in Cores.
+	return model.AvailableMetric(total/float64(len(cores)), "%", source, timestamp), cores
 }
 
 func (c *Collector) collectNPU(device device, found bool, timestamp time.Time) (model.Accelerator, []model.Warning) {

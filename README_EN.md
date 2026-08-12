@@ -4,12 +4,17 @@
 
 rtop is a read-only terminal system monitor for Rockchip Linux platforms. The
 current implementation includes generic Linux collectors, process ranking, an
-interactive terminal interface, and RK3588 GPU/NPU/DDR metrics discovered
-through devfreq. It also reports CPU/devfreq policy limits and governors,
+interactive terminal interface, and RK3588 GPU/NPU/DDR devfreq metrics plus
+RGA scheduler load. It also reports CPU/devfreq policy limits and governors,
 runtime power state, thermal trip points and cooling state, PSI pressure, CMA,
 zram statistics, hwmon power rails and fan state when the kernel exposes them.
 Per-core RKNPU load is shown when its debugfs node is readable; otherwise each
 core is explicitly marked `permission_denied`.
+
+When the unified Rockchip RGA driver exposes `/sys/kernel/debug/rkrga/load` or
+`/proc/rkrga/load`, rtop shows per-scheduler RGA load, their arithmetic mean,
+and the driver version. Older RGA/RGA2 drivers usually lack load accounting;
+rtop reports those interfaces as `unsupported` instead of estimating usage.
 
 ## Build
 

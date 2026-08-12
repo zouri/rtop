@@ -37,6 +37,12 @@ func TestAnalyzeReportsSourcesAndPermissionWarnings(t *testing.T) {
 	if check := findCheck(t, report, "metric.gpu.runtime_status"); check.Status != StatusPass || check.Message != "active" {
 		t.Fatalf("GPU runtime check = %#v", check)
 	}
+	if check := findCheck(t, report, "metric.rga.usage"); check.Status != StatusPass {
+		t.Fatalf("RGA usage check = %#v", check)
+	}
+	if check := findCheck(t, report, "metric.rga.frequency"); check.Status != StatusInfo {
+		t.Fatalf("RGA frequency check = %#v", check)
+	}
 	if check := findCheck(t, report, "metric.power.sensor0"); check.Status != StatusPass {
 		t.Fatalf("power sensor check = %#v", check)
 	}
@@ -152,6 +158,11 @@ func completeSnapshot() model.Snapshot {
 				}},
 			},
 			{Name: "DDR/DMC", Type: "ddr", Usage: available(15, "%", "/sys/dmc/load"), Frequency: available(528, "MHz", "/sys/dmc/cur_freq")},
+			{
+				Name: "Rockchip RGA", Type: "rga", Usage: available(30, "%", "/sys/kernel/debug/rkrga/load"),
+				Frequency: model.MissingMetric(model.Unsupported, "MHz", "/sys/kernel/debug/rkrga/load", "not exposed", now),
+				Cores:     []model.AcceleratorCore{{ID: 0, Name: "rga3", Usage: available(30, "%", "/sys/kernel/debug/rkrga/load")}},
+			},
 		},
 	}
 }

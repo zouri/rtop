@@ -162,7 +162,7 @@ func debugFSChecks(systemFS sysfs.SystemFS) []Check {
 		checks = append(checks, Check{
 			ID: "debugfs.mount", Name: "debugfs mount", Status: StatusWarning,
 			Message: "debugfs is not mounted", Source: source,
-			Suggestion: "Mount debugfs at /sys/kernel/debug if per-core NPU diagnostics are required.",
+			Suggestion: "Mount debugfs at /sys/kernel/debug if per-core NPU or RGA diagnostics are required.",
 		})
 	} else {
 		checks = append(checks, Check{
@@ -291,11 +291,20 @@ func snapshotChecks(snapshot model.Snapshot) []Check {
 	})
 	for _, accelerator := range accelerators {
 		prefix := "metric." + accelerator.Type
-		checks = append(checks,
-			metricCheck(prefix+".usage", accelerator.Name+" usage", accelerator.Usage, false),
-			metricCheck(prefix+".frequency", accelerator.Name+" frequency", accelerator.Frequency, false),
-			capabilityTextMetricCheck(prefix+".runtime_status", accelerator.Name+" runtime power state", accelerator.RuntimeStatus),
-		)
+		usageCheck := metricCheck(prefix+".usage", accelerator.Name+" usage", accelerator.Usage, false)
+		if accelerator.Type == "rga" && accelerator.Usage.Status == model.PermissionDenied {
+			usageCheck.Suggestion = "Grant narrowly scoped read access to /sys/kernel/debug/rkrga/load or use the procfs rkrga interface."
+		}
+		checks = append(checks, usageCheck)
+		frequencyCheck := metricCheck(prefix+".frequency", accelerator.Name+" frequency", accelerator.Frequency, false)
+		if accelerator.Type == "rga" && accelerator.Frequency.Status == model.Unsupported {
+			frequencyCheck.Status = StatusInfo
+		}
+		checks = append(checks, frequencyCheck,
+			capabilityTextMetricCheck(prefix+".runtime_status", accelerator.Name+" runtime power state", accelerator.RuntimeStatus))
+		if accelerator.DriverVersion != nil {
+			checks = append(checks, capabilityTextMetricCheck(prefix+".driver_version", accelerator.Name+" driver version", *accelerator.DriverVersion))
+		}
 		if accelerator.Policy != nil {
 			checks = append(checks,
 				capabilityMetricCheck(prefix+".policy.minimum", accelerator.Name+" minimum frequency", accelerator.Policy.Minimum),
@@ -304,14 +313,20 @@ func snapshotChecks(snapshot model.Snapshot) []Check {
 			)
 		}
 		for _, core := range accelerator.Cores {
+			coreName := fmt.Sprintf("core %d", core.ID)
+			if core.Name != "" {
+				coreName = core.Name
+			}
 			check := metricCheck(
 				fmt.Sprintf("%s.core%d", prefix, core.ID),
-				fmt.Sprintf("%s core %d", accelerator.Name, core.ID),
+				fmt.Sprintf("%s %s", accelerator.Name, coreName),
 				core.Usage,
 				false,
 			)
-			if core.Usage.Status == model.PermissionDenied {
+			if core.Usage.Status == model.PermissionDenied && accelerator.Type == "npu" {
 				check.Suggestion = "Grant read access to the RKNPU debugfs load node if per-core metrics are required."
+			} else if core.Usage.Status == model.PermissionDenied && accelerator.Type == "rga" {
+				check.Suggestion = "Grant read access to the rkrga load node if RGA scheduler metrics are required."
 			}
 			checks = append(checks, check)
 		}

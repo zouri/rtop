@@ -32,6 +32,17 @@ func TestCollectorFromKernel61Fixture(t *testing.T) {
 	assertMetric(t, accelerators[1].Frequency, 900)
 	assertMetric(t, accelerators[2].Usage, 28)
 	assertMetric(t, accelerators[2].Frequency, 528)
+	assertMetric(t, accelerators[3].Usage, 16)
+	if accelerators[3].Type != rgaType || accelerators[3].Frequency.Status != model.Unsupported {
+		t.Fatalf("RGA = %#v", accelerators[3])
+	}
+	if accelerators[3].DriverVersion == nil || accelerators[3].DriverVersion.Value == nil ||
+		*accelerators[3].DriverVersion.Value != "rga: v1.3.0" {
+		t.Fatalf("RGA driver version = %#v", accelerators[3].DriverVersion)
+	}
+	for id, want := range []float64{18, 24, 6} {
+		assertMetric(t, accelerators[3].Cores[id].Usage, want)
+	}
 	for id, want := range []float64{10, 20, 30} {
 		assertMetric(t, accelerators[1].Cores[id].Usage, want)
 	}
@@ -51,6 +62,14 @@ func TestCollectorFromBSP510Fixture(t *testing.T) {
 		t.Fatalf("DDR usage = %#v", accelerators[2].Usage)
 	}
 	assertMetric(t, accelerators[2].Frequency, 1560)
+	assertMetric(t, accelerators[3].Usage, 30)
+	if accelerators[3].Usage.Source != "/proc/rkrga/load" {
+		t.Fatalf("RGA source = %q", accelerators[3].Usage.Source)
+	}
+	if len(accelerators[3].Cores) != 2 || accelerators[3].Cores[0].Name != "rga3" ||
+		accelerators[3].Cores[1].Name != "rga2" {
+		t.Fatalf("RGA schedulers = %#v", accelerators[3].Cores)
+	}
 	for id, want := range []float64{5, 15, 25} {
 		assertMetric(t, accelerators[1].Cores[id].Usage, want)
 	}
@@ -123,6 +142,65 @@ func TestParseCoreLoadFormats(t *testing.T) {
 	}
 }
 
+func TestParseRGALoad(t *testing.T) {
+	content := []byte(`num of scheduler = 3
+================= load ==================
+scheduler[1]: rga3_core1
+	 load = 24%
+-----------------------------------
+scheduler[0]: rga3_core0
+	 load = 18%
+-----------------------------------
+scheduler[2]: rga2
+	 load = 6%
+`)
+	cores, err := parseRGALoad(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cores) != 3 {
+		t.Fatalf("cores = %#v", cores)
+	}
+	for id, want := range []float64{18, 24, 6} {
+		if cores[id].ID != id || cores[id].Usage.Value == nil || *cores[id].Usage.Value != want {
+			t.Fatalf("core %d = %#v", id, cores[id])
+		}
+	}
+	if cores[0].Name != "rga3_core0" || cores[2].Name != "rga2" {
+		t.Fatalf("scheduler names = %#v", cores)
+	}
+
+	for _, malformed := range [][]byte{
+		[]byte("RGA idle\n"),
+		[]byte("scheduler[0]: rga3\nload = 101%\n"),
+		[]byte("scheduler[0]: rga3\nload = 1%\nscheduler[0]: rga2\nload = 2%\n"),
+		[]byte("num of scheduler = 2\nscheduler[0]: rga3\nload = 1%\n"),
+	} {
+		if _, err := parseRGALoad(malformed); err == nil {
+			t.Fatalf("parseRGALoad(%q) succeeded", malformed)
+		}
+	}
+}
+
+func TestCollectorCachesMissingRGAProbe(t *testing.T) {
+	root := filepath.Join("..", "..", "..", "testdata", "generic-linux")
+	tracked := &readCountingFS{SystemFS: sysfs.MustNew(root), reads: make(map[string]int)}
+	collector := NewCollector(tracked)
+	accelerators, warnings := collector.Collect()
+	collector.Collect()
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %#v", warnings)
+	}
+	if accelerators[3].Usage.Status != model.Unsupported || accelerators[3].Usage.Value != nil {
+		t.Fatalf("missing RGA = %#v", accelerators[3])
+	}
+	for _, path := range rgaLoadCandidates {
+		if tracked.reads[path] != 1 {
+			t.Fatalf("reads[%s] = %d, want 1", path, tracked.reads[path])
+		}
+	}
+}
+
 func TestCollectorPreservesPermissionDenied(t *testing.T) {
 	root := filepath.Join("..", "..", "..", "testdata", "rk3588-kernel61")
 	base := sysfs.MustNew(root)
@@ -140,6 +218,9 @@ func TestCollectorPreservesPermissionDenied(t *testing.T) {
 		}
 	}
 	assertMetric(t, accelerators[1].Usage, 60)
+	if accelerators[3].Usage.Status != model.PermissionDenied {
+		t.Fatalf("RGA usage = %#v", accelerators[3].Usage)
+	}
 }
 
 func TestCollectorTreatsRuntimeSuspendedNPUAsIdle(t *testing.T) {

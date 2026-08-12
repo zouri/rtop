@@ -225,11 +225,13 @@ type Accelerator struct {
 	Frequency     Metric            `json:"frequency"`
 	Policy        *FrequencyPolicy  `json:"policy,omitempty"`
 	RuntimeStatus TextMetric        `json:"runtime_status"`
+	DriverVersion *TextMetric       `json:"driver_version,omitempty"`
 	Cores         []AcceleratorCore `json:"cores,omitempty"`
 }
 
 type AcceleratorCore struct {
 	ID    int    `json:"id"`
+	Name  string `json:"name,omitempty"`
 	Usage Metric `json:"usage"`
 }
 

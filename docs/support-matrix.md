@@ -1,13 +1,13 @@
 # Platform support matrix
 
-| Platform | Kernel/BSP | Generic metrics | GPU/NPU/DDR | Per-core NPU | Validation |
-|---|---|---:|---:|---:|---|
-| RK3588 | Linux 6.1 | Full | Full | Full when debugfs is readable | Verified on RK3588 hardware and fixtures |
-| RK3588 | Rockchip BSP 5.10 | Full | Full | Full when debugfs is readable | Parser and virtual-system fixtures; additional board reports welcome |
-| RK3566 | Vendor kernels | Expected | Partial | Single-core expected | Not yet hardware-verified |
-| RK3568 | Vendor kernels | Expected | Partial | Single-core expected | Not yet hardware-verified |
-| RK3576 | Vendor kernels | Expected | Partial | Two-core expected | Not yet hardware-verified |
-| Non-Rockchip Linux | Mainline/vendor | CPU, memory, load, thermal and processes | Unsupported unless compatible devfreq nodes exist | Unsupported | Generic Linux fixtures |
+| Platform | Kernel/BSP | Generic metrics | GPU/NPU/DDR | Per-core NPU | RGA load | Validation |
+|---|---|---:|---:|---:|---:|---|
+| RK3588 | Linux 6.1 | Full | Full | Full when debugfs is readable | Full when rkrga load is readable | Existing metrics hardware-verified; RGA parser and fixture verified, hardware validation pending |
+| RK3588 | Rockchip BSP 5.10 | Full | Full | Full when debugfs is readable | Full when rkrga load is readable | Parser and virtual-system fixtures; additional board reports welcome |
+| RK3566 | Vendor kernels | Expected | Partial | Single-core expected | Capability-probed | Not yet hardware-verified |
+| RK3568 | Vendor kernels | Expected | Partial | Single-core expected | Capability-probed | Not yet hardware-verified |
+| RK3576 | Vendor kernels | Expected | Partial | Two-core expected | Capability-probed | Not yet hardware-verified |
+| Non-Rockchip Linux | Mainline/vendor | CPU, memory, load, thermal and processes | Unsupported unless compatible devfreq nodes exist | Unsupported | Unsupported | Generic Linux fixtures |
 
 Status definitions:
 
@@ -29,3 +29,9 @@ absence does not reduce the generic support level in the table above.
 Board voltage, current, power, energy and fan/PWM metrics are likewise
 capability-probed through the standard hwmon ABI. They are reported only when
 the board exposes corresponding channels.
+
+RGA scheduler load is read from the unified Rockchip RGA driver's
+`/sys/kernel/debug/rkrga/load` or `/proc/rkrga/load` interface. Older RGA/RGA2
+drivers that do not implement this accounting are reported as `unsupported`.
+The aggregate RGA usage is the arithmetic mean of the reported scheduler
+loads; each raw scheduler percentage is also retained in the snapshot.
