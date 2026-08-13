@@ -25,6 +25,10 @@ Review the file before sharing it. It includes the hostname, board model, kernel
 version, device names and filesystem paths, but does not include process command
 lines or file contents.
 
+CPUFreq policy mapping, RK3588 shared frequency domains, `Frq` status meanings,
+and read-only inspection commands are documented in
+[cpufreq.md](cpufreq.md).
+
 ## Common warnings
 
 ### debugfs is not mounted

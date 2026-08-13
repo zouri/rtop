@@ -44,7 +44,7 @@ func TestHistoryIsBounded(t *testing.T) {
 	for range 150 {
 		uiModel.addHistory(testSnapshot())
 	}
-	if len(uiModel.cpuHistory) != 120 || len(uiModel.memoryHistory) != 120 || len(uiModel.gpuHistory) != 120 || len(uiModel.rgaHistory) != 120 {
+	if len(uiModel.cpuHistory) != 120 || len(uiModel.coreHistory[0]) != 120 || len(uiModel.memoryHistory) != 120 || len(uiModel.gpuHistory) != 120 || len(uiModel.rgaHistory) != 120 {
 		t.Fatalf("history lengths cpu=%d memory=%d gpu=%d rga=%d", len(uiModel.cpuHistory), len(uiModel.memoryHistory), len(uiModel.gpuHistory), len(uiModel.rgaHistory))
 	}
 }
@@ -116,9 +116,9 @@ func TestPageCollectionScopesAndNotifications(t *testing.T) {
 		want model.CollectionScope
 	}{
 		{pageAll, model.CollectAll},
-		{pageCPU, model.CollectCPU | model.CollectMemory | model.CollectThermals | model.CollectPower | model.CollectProcesses},
-		{pageMemory, model.CollectMemory | model.CollectProcesses},
-		{pageEngines, model.CollectAccelerators | model.CollectThermals | model.CollectPower},
+		{pageCPU, model.CollectCPU},
+		{pageMemory, model.CollectMemory | model.CollectAccelerators},
+		{pageEngines, model.CollectAccelerators},
 		{pageProcesses, model.CollectProcesses},
 		{pageInfo, model.CollectOverview},
 	}
@@ -211,7 +211,7 @@ func TestProcessPathShortcutTogglesExecutablePaths(t *testing.T) {
 		t.Fatal("process path toggle was not enabled")
 	}
 	view := ansi.Strip(uiModel.View())
-	for _, expected := range []string{"PATH", "/usr/bin/fixture-worker", "[rcuos/6]", "p paths"} {
+	for _, expected := range []string{"PATH", "/usr/bin/fixture-worker", "[rcuos/6]"} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("process page is missing %q after path toggle:\n%s", expected, view)
 		}
@@ -278,7 +278,7 @@ func TestSmallTerminalShowsResizeGuidance(t *testing.T) {
 	updated, _ = uiModel.Update(snapshotMsg{snapshot: testSnapshot()})
 	uiModel = updated.(Model)
 	view = ansi.Strip(uiModel.View())
-	if strings.Contains(view, "Minimum 24x8") || !strings.Contains(view, "CPU") {
+	if strings.Contains(view, "Minimum 24x8") || !strings.Contains(view, "Mem") {
 		t.Fatalf("normal UI was not restored after resize:\n%s", view)
 	}
 	assertViewFitsTerminal(t, uiModel)
@@ -295,14 +295,60 @@ func TestPageTabsRenderOnBottomLine(t *testing.T) {
 		current page
 		label   string
 	}{
-		{current: pageAll, label: "[1 ALL]"},
-		{current: pageProcesses, label: "[5 PROC]"},
+		{current: pageAll, label: "1ALL"},
+		{current: pageProcesses, label: "5PROC"},
 	} {
 		uiModel.setPage(test.current)
 		lines := strings.Split(ansi.Strip(uiModel.View()), "\n")
 		last := strings.TrimSpace(lines[len(lines)-1])
 		if !strings.Contains(last, test.label) {
 			t.Fatalf("page %d bottom line is missing %q: %q", test.current, test.label, last)
+		}
+	}
+}
+
+func TestJtopPageCyclingKeys(t *testing.T) {
+	notifications := make([]model.CollectionScope, 0, 3)
+	uiModel := NewModelWithScope(make(chan model.Snapshot), nil, func(scope model.CollectionScope) {
+		notifications = append(notifications, scope)
+	})
+
+	updated, command := uiModel.Update(tea.KeyMsg{Type: tea.KeyRight})
+	uiModel = updated.(Model)
+	if command == nil {
+		t.Fatal("right arrow did not notify the collection scope")
+	}
+	command()
+	if uiModel.page != pageCPU || notifications[len(notifications)-1] != scopeForPage(pageCPU) {
+		t.Fatalf("right arrow selected page=%d scopes=%v", uiModel.page, notifications)
+	}
+
+	updated, command = uiModel.Update(tea.KeyMsg{Type: tea.KeyTab})
+	uiModel = updated.(Model)
+	command()
+	if uiModel.page != pageMemory || notifications[len(notifications)-1] != scopeForPage(pageMemory) {
+		t.Fatalf("tab selected page=%d scopes=%v", uiModel.page, notifications)
+	}
+
+	updated, command = uiModel.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	uiModel = updated.(Model)
+	command()
+	if uiModel.page != pageCPU || notifications[len(notifications)-1] != scopeForPage(pageCPU) {
+		t.Fatalf("left arrow selected page=%d scopes=%v", uiModel.page, notifications)
+	}
+}
+
+func TestJtopMenuUsesCompactNativeLabels(t *testing.T) {
+	uiModel := NewModel(make(chan model.Snapshot), nil)
+	updated, _ := uiModel.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	uiModel = updated.(Model)
+	updated, _ = uiModel.Update(snapshotMsg{snapshot: testSnapshot()})
+	uiModel = updated.(Model)
+	lines := strings.Split(ansi.Strip(uiModel.View()), "\n")
+	last := strings.TrimSpace(lines[len(lines)-1])
+	for _, label := range []string{"1ALL", "2CPU", "3MEMORY", "4ENGINES", "5PROCESSES", "6INFO", "Quit"} {
+		if !strings.Contains(last, label) {
+			t.Fatalf("jtop menu is missing %q: %q", label, last)
 		}
 	}
 }
@@ -347,9 +393,70 @@ func TestStandardTerminalOverviewIncludesEngines(t *testing.T) {
 	updated, _ = uiModel.Update(snapshotMsg{snapshot: testSnapshot()})
 	uiModel = updated.(Model)
 	view := ansi.Strip(uiModel.View())
-	for _, expected := range []string{"CPU", "c0", "MEMORY", "TOP PROCESSES", "Mali GPU", "RKNPU", "Rockchip RGA"} {
+	for _, expected := range []string{"Mem", "GPU", "NPU", "RGA", "PID", "[CPU%]", "HW engines", "Sensor", "Power"} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("overview is missing %q:\n%s", expected, view)
+		}
+	}
+}
+
+func TestAllPageAnchorsSummaryPanesBelowFlexibleProcessTable(t *testing.T) {
+	uiModel := NewModel(make(chan model.Snapshot), nil)
+	updated, _ := uiModel.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	uiModel = updated.(Model)
+	updated, _ = uiModel.Update(snapshotMsg{snapshot: testSnapshot()})
+	uiModel = updated.(Model)
+
+	const bodyHeight = 22
+	lines := strings.Split(ansi.Strip(uiModel.renderJtopAll(bodyHeight)), "\n")
+	if len(lines) != bodyHeight {
+		t.Fatalf("ALL body height=%d, want %d:\n%s", len(lines), bodyHeight, strings.Join(lines, "\n"))
+	}
+
+	processHeader, summaryHeader := -1, -1
+	for index, line := range lines {
+		if strings.Contains(line, "PID") && strings.Contains(line, "[CPU%]") {
+			processHeader = index
+		}
+		if strings.Contains(line, "HW engines") && strings.Contains(line, "Sensor") && strings.Contains(line, "Power") {
+			summaryHeader = index
+		}
+	}
+	if processHeader < 0 || summaryHeader <= processHeader {
+		t.Fatalf("process table does not fill the area above the summary panes:\n%s", strings.Join(lines, "\n"))
+	}
+	if summaryHeader != bodyHeight-6 {
+		t.Fatalf("summary panes start on line %d, want %d:\n%s", summaryHeader+1, bodyHeight-6+1, strings.Join(lines, "\n"))
+	}
+	if count := strings.Count(lines[len(lines)-1], "└"); count != 3 {
+		t.Fatalf("summary panes are not anchored to the bottom: %q", lines[len(lines)-1])
+	}
+}
+
+func TestAllPageShowsMoreThanEightProcessesWhenSpaceAllows(t *testing.T) {
+	now := time.Now()
+	snapshot := testSnapshot()
+	snapshot.Processes = make([]model.ProcessInfo, 12)
+	for index := range snapshot.Processes {
+		snapshot.Processes[index] = model.ProcessInfo{
+			PID:  100 + index,
+			Name: fmt.Sprintf("process-%02d", index+1),
+			CPU: model.AvailableMetric(
+				float64(12-index), "%", fmt.Sprintf("/proc/%d/stat", 100+index), now,
+			),
+		}
+	}
+
+	uiModel := NewModel(make(chan model.Snapshot), nil)
+	updated, _ := uiModel.Update(tea.WindowSizeMsg{Width: 80, Height: 40})
+	uiModel = updated.(Model)
+	updated, _ = uiModel.Update(snapshotMsg{snapshot: snapshot})
+	uiModel = updated.(Model)
+	view := ansi.Strip(uiModel.View())
+
+	for index := 1; index <= len(snapshot.Processes); index++ {
+		if name := fmt.Sprintf("process-%02d", index); !strings.Contains(view, name) {
+			t.Fatalf("ALL page is missing %q despite available space:\n%s", name, view)
 		}
 	}
 }
@@ -423,13 +530,60 @@ func TestCPUPageRendersPerCoreUsageGraph(t *testing.T) {
 	view := ansi.Strip(uiModel.View())
 	coreGraph := false
 	for _, line := range strings.Split(view, "\n") {
-		if strings.Contains(line, "cpu0") && strings.Contains(line, "[") && strings.Contains(line, "]") {
+		if strings.Contains(line, "Frq") && strings.Contains(line, "[") && strings.Contains(line, "]") {
 			coreGraph = true
 			break
 		}
 	}
 	if !coreGraph {
 		t.Fatalf("CPU page is missing a per-core usage graph:\n%s", view)
+	}
+}
+
+func TestJtopCPUGridRendersEightCoresInStandardTerminal(t *testing.T) {
+	snapshot := testSnapshot()
+	prototype := snapshot.CPU.Cores[0]
+	snapshot.CPU.Cores = make([]model.CPUCore, 8)
+	for id := range snapshot.CPU.Cores {
+		core := prototype
+		core.ID = id
+		core.Usage = model.AvailableMetric(float64(10+id*8), "%", "/proc/stat", snapshot.Timestamp)
+		snapshot.CPU.Cores[id] = core
+	}
+
+	uiModel := NewModel(make(chan model.Snapshot), nil)
+	updated, _ := uiModel.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	uiModel = updated.(Model)
+	updated, _ = uiModel.Update(snapshotMsg{snapshot: snapshot})
+	uiModel = updated.(Model)
+	uiModel.setPage(pageCPU)
+	view := ansi.Strip(uiModel.View())
+	if count := strings.Count(view, "Frq["); count != 8 {
+		t.Fatalf("CPU grid frequency gauges=%d, want 8:\n%s", count, view)
+	}
+	assertViewFitsTerminal(t, uiModel)
+}
+
+func TestJtopFrequencyGaugeDistinguishesMissingDataFromOffline(t *testing.T) {
+	now := time.Now()
+	tests := []struct {
+		name      string
+		frequency model.Metric
+		want      string
+	}{
+		{name: "unsupported", frequency: model.MissingMetric(model.Unsupported, "MHz", "freq", "missing", now), want: "N/A"},
+		{name: "permission", frequency: model.MissingMetric(model.PermissionDenied, "MHz", "freq", "denied", now), want: "DENIED"},
+		{name: "unavailable", frequency: model.MissingMetric(model.Unavailable, "MHz", "freq", "failed", now), want: "--"},
+	}
+	for _, test := range tests {
+		view := ansi.Strip(jtopFrequencyGauge("Frq", test.frequency, nil, 48))
+		if !strings.Contains(view, test.want) || strings.Contains(view, "OFF") {
+			t.Fatalf("%s frequency gauge=%q, want %q without OFF", test.name, view, test.want)
+		}
+	}
+	view := ansi.Strip(jtopFrequencyGauge("Frq", model.AvailableMetric(1200, "MHz", "freq", now), nil, 48))
+	if !strings.Contains(view, "1200MHz") || strings.Contains(view, "OFF") {
+		t.Fatalf("frequency without policy range=%q", view)
 	}
 }
 
@@ -550,7 +704,7 @@ func TestCPUCoreRowsAndGroupHeadersFillAvailableWidth(t *testing.T) {
 	}
 }
 
-func TestCPUAndMemoryPagesRenderProcessRankings(t *testing.T) {
+func TestCPUAndMemoryPagesUseJtopCharts(t *testing.T) {
 	uiModel := NewModel(make(chan model.Snapshot), nil)
 	updated, _ := uiModel.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
 	uiModel = updated.(Model)
@@ -559,26 +713,16 @@ func TestCPUAndMemoryPagesRenderProcessRankings(t *testing.T) {
 
 	for _, test := range []struct {
 		current page
-		title   string
+		values  []string
 	}{
-		{current: pageCPU, title: "TOP PROCESSES · CPU"},
-		{current: pageMemory, title: "TOP PROCESSES · MEMORY"},
+		{current: pageCPU, values: []string{"ALL", "Frq", "schedutil", "1800MHz"}},
+		{current: pageMemory, values: []string{"RAM", "Used:", "SWAP", "zram0", "PSI cpu"}},
 	} {
 		uiModel.setPage(test.current)
-		uiModel.showProcessPath = false
 		view := ansi.Strip(uiModel.View())
-		for _, expected := range []string{test.title, "fixture worker", "p paths"} {
+		for _, expected := range test.values {
 			if !strings.Contains(view, expected) {
 				t.Fatalf("page %d is missing %q:\n%s", test.current, expected, view)
-			}
-		}
-
-		updated, _ = uiModel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
-		uiModel = updated.(Model)
-		view = ansi.Strip(uiModel.View())
-		for _, expected := range []string{"PATH", "/usr/bin/fixture-worker"} {
-			if !strings.Contains(view, expected) {
-				t.Fatalf("page %d is missing %q after path toggle:\n%s", test.current, expected, view)
 			}
 		}
 	}
@@ -613,7 +757,7 @@ func TestMemoryPageUsesFullWidthRows(t *testing.T) {
 	}
 }
 
-func TestCPUProcessRankingIsReachableInStandardTerminal(t *testing.T) {
+func TestCPUHistoryIsReachableInStandardTerminal(t *testing.T) {
 	uiModel := NewModel(make(chan model.Snapshot), nil)
 	updated, _ := uiModel.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	uiModel = updated.(Model)
@@ -626,7 +770,7 @@ func TestCPUProcessRankingIsReachableInStandardTerminal(t *testing.T) {
 		uiModel = updated.(Model)
 	}
 	view := ansi.Strip(uiModel.View())
-	for _, expected := range []string{"TOP PROCESSES · CPU", "fixture worker", "[2 CPU]"} {
+	for _, expected := range []string{"ALL", "Frq", "1800MHz", "2CPU"} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("standard CPU page is missing %q after scrolling:\n%s", expected, view)
 		}
@@ -634,7 +778,7 @@ func TestCPUProcessRankingIsReachableInStandardTerminal(t *testing.T) {
 	assertViewFitsTerminal(t, uiModel)
 }
 
-func TestAllPageKeepsPerCoreUsageCompact(t *testing.T) {
+func TestAllPageUsesCompactCoreGauges(t *testing.T) {
 	uiModel := NewModel(make(chan model.Snapshot), nil)
 	updated, _ := uiModel.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	uiModel = updated.(Model)
@@ -642,18 +786,11 @@ func TestAllPageKeepsPerCoreUsageCompact(t *testing.T) {
 	uiModel = updated.(Model)
 	view := ansi.Strip(uiModel.View())
 	for _, line := range strings.Split(view, "\n") {
-		if start := strings.Index(line, "c0"); start >= 0 {
-			coreSection := line[start:]
-			if end := strings.Index(coreSection, "│"); end >= 0 {
-				coreSection = coreSection[:end]
-			}
-			if strings.Contains(coreSection, "[") || strings.Contains(coreSection, "]") {
-				t.Fatalf("ALL page core row contains a load bar: %q", line)
-			}
+		if strings.Contains(line, "1800MHz") && strings.Contains(line, "[") && strings.Contains(line, "]") {
 			return
 		}
 	}
-	t.Fatal("ALL page is missing the compact core row")
+	t.Fatal("ALL page is missing the compact core gauge")
 }
 
 func TestDetailPagesRenderDVFSPressureAndThermalControls(t *testing.T) {
@@ -664,9 +801,9 @@ func TestDetailPagesRenderDVFSPressureAndThermalControls(t *testing.T) {
 	uiModel = updated.(Model)
 
 	for currentPage, expected := range map[page][]string{
-		pageCPU:     {"LITTLE · cpu0", "600–1800MHz", "schedutil", "board-fan"},
-		pageMemory:  {"CMA", "PSI avg10", "ZRAM"},
-		pageEngines: {"power active", "simple_ondemand", "Rockchip RGA", "rga3", "rga2", "passive", "COOLING", "POWER & FANS", "board-fan"},
+		pageCPU:     {"ALL", "600–1800MHz", "schedutil"},
+		pageMemory:  {"CMA", "PSI cpu", "zram0"},
+		pageEngines: {"power active", "simple_ondemand", "RGA", "rga3", "rga2"},
 	} {
 		uiModel.page = currentPage
 		view := ansi.Strip(uiModel.View())

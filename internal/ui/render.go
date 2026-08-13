@@ -52,7 +52,7 @@ func (m Model) View() string {
 		Height(bodyHeight).
 		MaxHeight(bodyHeight).
 		Render(body)
-	return header + body + footer
+	return header + body + "\n" + footer
 }
 
 func (m Model) renderSmallTerminal() string {
@@ -86,33 +86,18 @@ func pageTitle(current page) string {
 }
 
 func (m Model) renderHeader() string {
-	stamp := "waiting for metrics"
-	if m.hasData {
-		stamp = m.latest.Timestamp.Format("15:04:05")
+	if !m.hasData {
+		return titleStyle.Render("Model: waiting for Rockchip metrics") + "\n"
 	}
-	identity := ""
-	if m.hasData {
-		parts := make([]string, 0, 3)
-		if m.latest.System.Hostname != "" {
-			parts = append(parts, m.latest.System.Hostname)
-		}
-		if m.latest.System.Board != "" {
-			parts = append(parts, m.latest.System.Board)
-		} else if m.latest.System.SoC != "" {
-			parts = append(parts, m.latest.System.SoC)
-		}
-		identity = strings.Join(parts, " · ")
+	board := fallback(m.latest.System.Board, fallback(m.latest.System.SoC, "Rockchip Linux"))
+	left := "Model: " + board
+	if m.latest.System.SoC != "" && m.latest.System.SoC != board {
+		left += " - " + m.latest.System.SoC
 	}
-	status := titleStyle.Render("rtop")
-	if identity != "" {
-		status += "  " + mutedStyle.Render(identity)
+	if m.latest.System.Kernel != "" {
+		left += " [" + m.latest.System.Kernel + "]"
 	}
-	status += "  " + mutedStyle.Render(stamp)
-	if len(m.latest.Warnings) > 0 {
-		status += "  " + warnStyle.Render(fmt.Sprintf("!%d", len(m.latest.Warnings)))
-	}
-	status = ansi.Truncate(status, m.width, "")
-	return lipgloss.NewStyle().Width(m.width).MaxWidth(m.width).Render(status) + "\n"
+	return ansi.Truncate(titleStyle.Render(left), m.width, "") + "\n"
 }
 
 func (m Model) renderTabs() string {
@@ -121,47 +106,41 @@ func (m Model) renderTabs() string {
 		narrow string
 		page   page
 	}{
-		{"1 ALL", "1 ALL", pageAll},
-		{"2 CPU", "2 CPU", pageCPU},
-		{"3 MEMORY", "3 MEM", pageMemory},
-		{"4 ENGINES", "4 ENG", pageEngines},
-		{"5 PROCESSES", "5 PROC", pageProcesses},
-		{"6 INFO", "6 INFO", pageInfo},
+		{"1ALL", "1ALL", pageAll},
+		{"2CPU", "2CPU", pageCPU},
+		{"3MEMORY", "3MEM", pageMemory},
+		{"4ENGINES", "4ENG", pageEngines},
+		{"5PROCESSES", "5PROC", pageProcesses},
+		{"6INFO", "6INFO", pageInfo},
 	}
-	labels := make([]string, 0, len(tabs))
+	labels := make([]string, 0, len(tabs)+1)
 	for _, tab := range tabs {
 		label := tab.wide
 		if m.width < 88 {
 			label = tab.narrow
 		}
 		if tab.page == m.page {
-			labels = append(labels, titleStyle.Render("["+label+"]"))
+			labels = append(labels, lipgloss.NewStyle().Bold(true).Render(label+" "))
 		} else {
-			labels = append(labels, mutedStyle.Render(label))
+			labels = append(labels, lipgloss.NewStyle().Reverse(true).Render(label+" "))
 		}
 	}
-	tabLine := strings.Join(labels, "  ")
+	labels = append(labels, lipgloss.NewStyle().Reverse(true).Render("Quit "))
+	tabLine := " " + strings.Join(labels, "")
 	if m.width < 56 {
 		current := tabs[int(m.page)].narrow
-		tabLine = titleStyle.Render("["+current+"]") + mutedStyle.Render("  1-6 pages  ? help")
+		tabLine = " " + lipgloss.NewStyle().Bold(true).Render(current+" ") +
+			lipgloss.NewStyle().Reverse(true).Render("1-6 pages  Quit ")
 	}
-	tabLine = ansi.Truncate(tabLine, m.width, "")
-	return lipgloss.NewStyle().Width(m.width).MaxWidth(m.width).Render(tabLine)
+	used := ansi.StringWidth(tabLine)
+	if used < m.width {
+		tabLine += lipgloss.NewStyle().Reverse(true).Render(strings.Repeat(" ", m.width-used))
+	}
+	return ansi.Truncate(tabLine, m.width, "")
 }
 
 func (m Model) renderFooter() string {
-	var hint string
-	switch {
-	case m.showHelp:
-		hint = "j/k scroll  esc close  q quit"
-	case m.page == pageProcesses:
-		hint = "j/k select  c CPU  m MEM  p paths  enter details  r refresh  ? help  q quit"
-	case m.page == pageAll || m.page == pageCPU || m.page == pageMemory:
-		hint = "j/k scroll  p paths  r refresh  ? help  q quit"
-	default:
-		hint = "j/k scroll  r refresh  ? help  q quit"
-	}
-	return "\n" + ansi.Truncate(mutedStyle.Render(hint), m.width, "") + "\n" + m.renderTabs()
+	return m.renderTabs()
 }
 
 func (m Model) renderBody(height int) string {
@@ -181,17 +160,17 @@ func (m Model) renderPage(height int) string {
 	}
 	switch m.page {
 	case pageCPU:
-		return m.renderCPU(height)
+		return m.renderJtopCPU(height)
 	case pageMemory:
-		return m.renderMemory(height)
+		return m.renderJtopMemory(height)
 	case pageEngines:
-		return m.renderEngines(height)
+		return m.renderJtopEngines(height)
 	case pageProcesses:
-		return m.renderProcesses(height)
+		return m.renderJtopProcesses(height)
 	case pageInfo:
-		return m.renderInfo(height)
+		return m.renderJtopInfo(height)
 	default:
-		return m.renderAll(height)
+		return m.renderJtopAll(height)
 	}
 }
 

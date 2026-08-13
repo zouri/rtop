@@ -190,7 +190,7 @@ const (
 | 指标 | 主要数据源 | 说明 |
 |---|---|---|
 | CPU 使用率 | /proc/stat | 通过两次采样差值计算 |
-| CPU 频率 | /sys/devices/system/cpu/*/cpufreq | 支持大小核分组 |
+| CPU 频率 | `/sys/devices/system/cpu/cpufreq/policy*` | 按 `related_cpus` 映射共享 policy；详见 [cpufreq.md](cpufreq.md) |
 | 内存与 Swap | /proc/meminfo | Linux 通用 |
 | CMA | /proc/meminfo | 重点观察媒体与 NPU 连续内存余量 |
 | PSI | /proc/pressure | CPU、内存与 I/O 停顿压力 |

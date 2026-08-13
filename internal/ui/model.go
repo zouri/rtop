@@ -52,6 +52,7 @@ type Model struct {
 	topMemoryProcesses []model.ProcessInfo
 
 	cpuHistory    []float64
+	coreHistory   map[int][]float64
 	memoryHistory []float64
 	gpuHistory    []float64
 	npuHistory    []float64
@@ -81,7 +82,7 @@ func NewModelWithScope(
 	helper.ShowAll = false
 	return Model{
 		snapshots: snapshots, refresh: refresh, scopeChanged: scopeChanged,
-		keys: newKeyMap(), help: helper,
+		keys: newKeyMap(), help: helper, coreHistory: make(map[int][]float64),
 	}
 }
 
@@ -139,6 +140,14 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.scrollOffset = 0
 			return m, nil
 		}
+		if !m.showHelp && key.Matches(message, m.keys.Previous) {
+			m.setPage((m.page + pageInfo) % (pageInfo + 1))
+			return m, m.scopeCommand()
+		}
+		if !m.showHelp && key.Matches(message, m.keys.Next) {
+			m.setPage((m.page + 1) % (pageInfo + 1))
+			return m, m.scopeCommand()
+		}
 
 		if key.Matches(message, m.keys.All) {
 			m.setPage(pageAll)
@@ -186,7 +195,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if key.Matches(message, m.keys.Paths) &&
-			(m.page == pageAll || m.page == pageCPU || m.page == pageMemory || m.page == pageProcesses) {
+			(m.page == pageAll || m.page == pageProcesses) {
 			m.showProcessPath = !m.showProcessPath
 			return m, nil
 		}
@@ -259,11 +268,11 @@ func (m Model) scopeCommand() tea.Cmd {
 func scopeForPage(current page) model.CollectionScope {
 	switch current {
 	case pageCPU:
-		return model.CollectCPU | model.CollectMemory | model.CollectThermals | model.CollectPower | model.CollectProcesses
+		return model.CollectCPU
 	case pageMemory:
-		return model.CollectMemory | model.CollectProcesses
+		return model.CollectMemory | model.CollectAccelerators
 	case pageEngines:
-		return model.CollectAccelerators | model.CollectThermals | model.CollectPower
+		return model.CollectAccelerators
 	case pageProcesses:
 		return model.CollectProcesses
 	case pageInfo:
@@ -374,9 +383,9 @@ func (m *Model) sortProcesses() {
 }
 
 func (m *Model) updateProcessRankings() {
-	const maximumOverviewProcesses = 8
-	m.topCPUProcesses = topRankedProcesses(m.latest.Processes, maximumOverviewProcesses, sortCPU)
-	m.topMemoryProcesses = topRankedProcesses(m.latest.Processes, maximumOverviewProcesses, sortMemory)
+	limit := len(m.latest.Processes)
+	m.topCPUProcesses = topRankedProcesses(m.latest.Processes, limit, sortCPU)
+	m.topMemoryProcesses = topRankedProcesses(m.latest.Processes, limit, sortMemory)
 }
 
 func topRankedProcesses(processes []model.ProcessInfo, limit int, order processSort) []model.ProcessInfo {
@@ -384,23 +393,11 @@ func topRankedProcesses(processes []model.ProcessInfo, limit int, order processS
 		return []model.ProcessInfo{}
 	}
 	limit = min(limit, len(processes))
-	result := make([]model.ProcessInfo, 0, limit)
-	for _, process := range processes {
-		index := sort.Search(len(result), func(index int) bool {
-			return processRanksBefore(process, result[index], order)
-		})
-		if index >= limit {
-			continue
-		}
-		if len(result) < limit {
-			result = append(result, model.ProcessInfo{})
-			copy(result[index+1:], result[index:len(result)-1])
-		} else {
-			copy(result[index+1:], result[index:len(result)-1])
-		}
-		result[index] = process
-	}
-	return result
+	result := append([]model.ProcessInfo(nil), processes...)
+	sort.SliceStable(result, func(i, j int) bool {
+		return processRanksBefore(result[i], result[j], order)
+	})
+	return result[:limit:limit]
 }
 
 func processRanksBefore(left, right model.ProcessInfo, order processSort) bool {
@@ -418,6 +415,12 @@ func (m *Model) addHistory(snapshot model.Snapshot) {
 	scope := collectedScope(snapshot)
 	if scope.Includes(model.CollectCPU) {
 		m.cpuHistory = appendHistory(m.cpuHistory, metricNumber(snapshot.CPU.Overall))
+		if m.coreHistory == nil {
+			m.coreHistory = make(map[int][]float64)
+		}
+		for _, core := range snapshot.CPU.Cores {
+			m.coreHistory[core.ID] = appendHistory(m.coreHistory[core.ID], metricNumber(core.Usage))
+		}
 	}
 	if scope.Includes(model.CollectMemory) {
 		m.memoryHistory = appendHistory(m.memoryHistory, memoryPercent(snapshot.Memory))

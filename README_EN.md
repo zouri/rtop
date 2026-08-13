@@ -56,18 +56,19 @@ rtop doctor --json
 
 The TUI follows a jtop-style board monitor layout. The layout responds to
 terminal resizing down to 24 columns by 8 rows. Smaller windows show a compact
-resize hint instead of drawing clipped cards.
+resize hint instead of drawing clipped panels.
 
 - `1`: ALL board overview.
-- `2`: CPU load, frequency policy, thermal limits, cooling, power, fans and CPU-heavy processes.
-- `3`: memory, CMA, PSI, zram, load and memory-heavy processes.
-- `4`: Rockchip engines, devfreq policy, runtime state, thermals, board power and fans.
+- `2`: total CPU load, per-core history charts, frequency ranges, and governors.
+- `3`: memory history, swap, CMA, PSI, zram, and DDR status.
+- `4`: Rockchip engine load, frequency, devfreq policy, runtime state, and per-core status.
 - `5`: process table.
 - `6` or `i`: board, driver and metric-source information.
+- `←`/`→` or `Tab`: cycle through pages as in jtop.
 - `?`: show Help without leaving the active page.
 - `↑`/`↓` or `j`/`k`: select a process or scroll a detail page.
 - `c`/`m`: sort processes by CPU or memory.
-- `p`: show or hide executable paths on pages containing process lists.
+- `p`: show or hide executable paths on the ALL and PROCESSES pages.
 - `Enter`: toggle details for the selected process.
 - `r`: request an immediate refresh.
 - `q` or `Ctrl+C`: exit.
@@ -82,9 +83,9 @@ reduce observer overhead; adjust them with `--process-interval` and
 `--thermal-interval`. Pressing `r` forces the active page's collectors to
 refresh.
 
-The TUI also collects by page. ALL collects the board-wide view, CPU combines
-CPU/load/thermal/power metrics, Memory adds process ranking, Engines combines
-accelerator/thermal/power metrics, Processes scans only processes, and Info
+The TUI also collects by page. ALL collects the board-wide view, CPU collects
+only CPU metrics, Memory collects memory and DDR metrics, Engines collects
+accelerator metrics, Processes scans only processes, and Info
 reads the lightweight capability groups. Help is an overlay and does not change
 the active collection scope. The UI retains the last value for groups that are
 not collected on the active page instead of presenting them as missing.
@@ -98,7 +99,9 @@ For headless output, `snapshot --top N` emits only the busiest N processes and
 permissions, DVFS controls, memory-pressure capabilities, thermal controls,
 hwmon power/fan capabilities, and the selected source for each metric. It is
 read-only and never mounts filesystems or changes permissions. See
-[docs/diagnostics.md](docs/diagnostics.md) for interpreting the report.
+[docs/diagnostics.md](docs/diagnostics.md) for interpreting the report. The
+CPUFreq policy model, RK3588 shared frequency domains, and `Frq` status meanings
+are documented in [docs/cpufreq.md](docs/cpufreq.md).
 
 ## Packaging
 

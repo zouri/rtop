@@ -8,6 +8,8 @@ import (
 type keyMap struct {
 	Up         key.Binding
 	Down       key.Binding
+	Previous   key.Binding
+	Next       key.Binding
 	All        key.Binding
 	CPU        key.Binding
 	Memory     key.Binding
@@ -33,6 +35,14 @@ func newKeyMap() keyMap {
 		Down: key.NewBinding(
 			key.WithKeys("down", "j"),
 			key.WithHelp("↓/j", "down"),
+		),
+		Previous: key.NewBinding(
+			key.WithKeys("left"),
+			key.WithHelp("←", "previous page"),
+		),
+		Next: key.NewBinding(
+			key.WithKeys("right", "tab"),
+			key.WithHelp("→/tab", "next page"),
 		),
 		All: key.NewBinding(
 			key.WithKeys("1"),
@@ -100,7 +110,7 @@ func (k keyMap) ShortHelp() []key.Binding {
 func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.All, k.CPU, k.Memory, k.Engines, k.Processes, k.Info},
-		{k.Up, k.Down, k.SortCPU, k.SortMemory, k.Paths, k.Details},
+		{k.Previous, k.Next, k.Up, k.Down, k.SortCPU, k.SortMemory, k.Paths, k.Details},
 		{k.Refresh, k.Help, k.Back, k.Quit},
 	}
 }

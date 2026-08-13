@@ -204,6 +204,12 @@ func (c *Collector) Collect(ctx context.Context) (model.CPUInfo, []model.Warning
 	sort.Slice(coreNames, func(i, j int) bool {
 		return coreID(coreNames[i]) < coreID(coreNames[j])
 	})
+	// A policy is shared by all CPUs controlled through the same P-state
+	// interface, so read its dynamic files once per snapshot rather than once
+	// per core. Besides reducing sysfs traffic, this ensures every core in a
+	// shared RK3588 cluster displays one coherent frequency sample.
+	policyFrequencies := make(map[string]model.Metric)
+	policies := make(map[string]*model.FrequencyPolicy)
 	for _, name := range coreNames {
 		id := coreID(name)
 		usage := model.MissingMetric(model.Unavailable, "%", procStatPath, "previous sample unavailable", timestamp)
@@ -214,8 +220,16 @@ func (c *Collector) Collect(ctx context.Context) (model.CPUInfo, []model.Warning
 		frequency := model.Metric{}
 		var policy *model.FrequencyPolicy
 		if ok {
-			frequency = c.readFrequency(topology.currentPath, timestamp)
-			policy = c.readPolicy(topology, timestamp)
+			frequency, ok = policyFrequencies[topology.basePath]
+			if !ok {
+				frequency = c.readFrequency(topology.currentPath, timestamp)
+				policyFrequencies[topology.basePath] = frequency
+			}
+			policy = policies[topology.basePath]
+			if policy == nil {
+				policy = c.readPolicy(topology, timestamp)
+				policies[topology.basePath] = policy
+			}
 		} else {
 			frequency = model.MissingMetric(model.Unsupported, "MHz", cpuFreqBase(id), "cpufreq is not exposed", timestamp)
 		}
@@ -245,6 +259,9 @@ func (c *Collector) unavailableCPU(timestamp time.Time, err error) model.CPUInfo
 }
 
 func discoverFrequencyTopology(systemFS sysfs.SystemFS) (map[int]frequencyTopology, map[int]string) {
+	// Keep the per-CPU layout as a compatibility fallback. On a conforming
+	// CPUFreq system cpuN/cpufreq is a symlink to a policy directory, but some
+	// BSPs expose only one usable link (or only the policy directories).
 	frequencyPaths := make(map[int]string)
 	fallback, _ := systemFS.Glob("/sys/devices/system/cpu/cpu[0-9]*/cpufreq/cpuinfo_cur_freq")
 	for _, path := range fallback {
@@ -259,10 +276,29 @@ func discoverFrequencyTopology(systemFS sysfs.SystemFS) (map[int]frequencyTopolo
 		}
 	}
 
+	basePaths := make(map[int]string, len(frequencyPaths))
+	for id, path := range frequencyPaths {
+		basePaths[id] = filepath.Dir(path)
+	}
+	// CPUFreq policies are the canonical representation of CPUs sharing one
+	// hardware P-state control interface. related_cpus includes both online and
+	// offline CPUs; affected_cpus is the online-only fallback used by older BSPs.
+	policyPaths, _ := systemFS.Glob("/sys/devices/system/cpu/cpufreq/policy[0-9]*")
+	for _, basePath := range policyPaths {
+		ids := readPolicyCPUs(systemFS, filepath.Join(basePath, "related_cpus"))
+		if len(ids) == 0 {
+			ids = readPolicyCPUs(systemFS, filepath.Join(basePath, "affected_cpus"))
+		}
+		for _, id := range ids {
+			frequencyPaths[id] = filepath.Join(basePath, "scaling_cur_freq")
+			basePaths[id] = basePath
+		}
+	}
+
 	topology := make(map[int]frequencyTopology, len(frequencyPaths))
 	maximums := make(map[int]float64, len(frequencyPaths))
 	for id, currentPath := range frequencyPaths {
-		basePath := filepath.Dir(currentPath)
+		basePath := basePaths[id]
 		hardwareMinimum := readStaticFrequency(systemFS, filepath.Join(basePath, "cpuinfo_min_freq"), 1000)
 		hardwareMaximum := readStaticFrequency(systemFS, filepath.Join(basePath, "cpuinfo_max_freq"), 1000)
 		topology[id] = frequencyTopology{
@@ -274,6 +310,55 @@ func discoverFrequencyTopology(systemFS sysfs.SystemFS) (map[int]frequencyTopolo
 		}
 	}
 	return topology, classifyClusters(maximums)
+}
+
+func readPolicyCPUs(systemFS sysfs.SystemFS, path string) []int {
+	data, err := systemFS.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	ids, err := parseCPUList(string(data))
+	if err != nil {
+		return nil
+	}
+	return ids
+}
+
+// parseCPUList accepts both the space-separated format normally emitted by
+// related_cpus/affected_cpus ("0 1 2 3") and Linux cpulist ranges
+// ("0-3,6-7"). Supporting both keeps the policy mapping portable across BSPs.
+func parseCPUList(value string) ([]int, error) {
+	fields := strings.FieldsFunc(strings.TrimSpace(value), func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n'
+	})
+	seen := make(map[int]struct{})
+	ids := make([]int, 0, len(fields))
+	for _, field := range fields {
+		bounds := strings.Split(field, "-")
+		if len(bounds) > 2 || len(bounds) == 0 {
+			return nil, fmt.Errorf("invalid CPU list element %q", field)
+		}
+		first, err := strconv.Atoi(bounds[0])
+		if err != nil || first < 0 {
+			return nil, fmt.Errorf("invalid CPU list element %q", field)
+		}
+		last := first
+		if len(bounds) == 2 {
+			last, err = strconv.Atoi(bounds[1])
+			if err != nil || last < first {
+				return nil, fmt.Errorf("invalid CPU list range %q", field)
+			}
+		}
+		for id := first; id <= last; id++ {
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			ids = append(ids, id)
+		}
+	}
+	sort.Ints(ids)
+	return ids, nil
 }
 
 func readStaticFrequency(systemFS sysfs.SystemFS, path string, divisor float64) staticFrequency {
