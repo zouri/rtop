@@ -369,6 +369,10 @@ func printSnapshot(writer io.Writer, snapshot model.Snapshot) {
 		if policy := formatFrequencyPolicy(accelerator.Policy); policy != "" {
 			fmt.Fprintf(writer, "  policy: %s\n", policy)
 		}
+		for _, session := range accelerator.Sessions {
+			fmt.Fprintf(writer, "  session %d: status %s  TGID %d  process %s\n",
+				session.Session, session.Status, session.TGID, session.Process)
+		}
 	}
 	for _, sensor := range snapshot.Power {
 		name := sensor.Name

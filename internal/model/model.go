@@ -219,20 +219,28 @@ type FanInfo struct {
 }
 
 type Accelerator struct {
-	Name          string            `json:"name"`
-	Type          string            `json:"type"`
-	Usage         Metric            `json:"usage"`
-	Frequency     Metric            `json:"frequency"`
-	Policy        *FrequencyPolicy  `json:"policy,omitempty"`
-	RuntimeStatus TextMetric        `json:"runtime_status"`
-	DriverVersion *TextMetric       `json:"driver_version,omitempty"`
-	Cores         []AcceleratorCore `json:"cores,omitempty"`
+	Name          string               `json:"name"`
+	Type          string               `json:"type"`
+	Usage         Metric               `json:"usage"`
+	Frequency     Metric               `json:"frequency"`
+	Policy        *FrequencyPolicy     `json:"policy,omitempty"`
+	RuntimeStatus TextMetric           `json:"runtime_status"`
+	DriverVersion *TextMetric          `json:"driver_version,omitempty"`
+	Cores         []AcceleratorCore    `json:"cores,omitempty"`
+	Sessions      []AcceleratorSession `json:"sessions,omitempty"`
 }
 
 type AcceleratorCore struct {
 	ID    int    `json:"id"`
 	Name  string `json:"name,omitempty"`
 	Usage Metric `json:"usage"`
+}
+
+type AcceleratorSession struct {
+	Session int    `json:"session"`
+	Status  string `json:"status"`
+	TGID    int    `json:"tgid"`
+	Process string `json:"process"`
 }
 
 type ProcessInfo struct {

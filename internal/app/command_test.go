@@ -75,6 +75,21 @@ func TestCommandVersion(t *testing.T) {
 	}
 }
 
+func TestPrintSnapshotIncludesAcceleratorSessions(t *testing.T) {
+	var output bytes.Buffer
+	printSnapshot(&output, model.Snapshot{
+		Accelerators: []model.Accelerator{{
+			Name: "Rockchip RGA",
+			Sessions: []model.AcceleratorSession{{
+				Session: 6, Status: "active", TGID: 225320, Process: "/opt/broker --serve",
+			}},
+		}},
+	})
+	if !strings.Contains(output.String(), "session 6: status active  TGID 225320  process /opt/broker --serve") {
+		t.Fatalf("snapshot output is missing RGA session:\n%s", output.String())
+	}
+}
+
 func TestCommandAllowsUnusedSamplingFlags(t *testing.T) {
 	root := filepath.Join("..", "..", "testdata", "generic-linux")
 	for _, args := range [][]string{

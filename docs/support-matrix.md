@@ -34,4 +34,8 @@ RGA scheduler load is read from the unified Rockchip RGA driver's
 `/sys/kernel/debug/rkrga/load` or `/proc/rkrga/load` interface. Older RGA/RGA2
 drivers that do not implement this accounting are reported as `unsupported`.
 The aggregate RGA usage is the arithmetic mean of the reported scheduler
-loads; each raw scheduler percentage is also retained in the snapshot.
+loads; each raw scheduler percentage is also retained in the snapshot. When
+the same report includes a session table, rtop retains its session ID, status,
+TGID and process command. These records identify clients but do not provide
+per-process utilization. Malformed session rows are skipped independently of
+the scheduler load parser and produce a diagnostic warning.

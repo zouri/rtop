@@ -526,6 +526,7 @@ func (m Model) renderJtopEngines(_ int) string {
 			name := fallback(core.Name, fmt.Sprintf("Core %d", core.ID))
 			lines = append(lines, "  "+jtopMetricGauge(name, core.Usage, "", max(1, m.width-2)))
 		}
+		lines = append(lines, acceleratorSessionLines(accelerator.Sessions, m.width)...)
 		sections = append(sections, strings.Join(lines, "\n"))
 	}
 	return fitLines(strings.Join(sections, "\n"), m.width)

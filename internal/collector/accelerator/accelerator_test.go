@@ -43,6 +43,11 @@ func TestCollectorFromKernel61Fixture(t *testing.T) {
 	for id, want := range []float64{18, 24, 6} {
 		assertMetric(t, accelerators[3].Cores[id].Usage, want)
 	}
+	if sessions := accelerators[3].Sessions; len(sessions) != 1 ||
+		sessions[0].Session != 1 || sessions[0].Status != "active" ||
+		sessions[0].TGID != 1234 || sessions[0].Process != "compositor" {
+		t.Fatalf("RGA sessions = %#v", sessions)
+	}
 	for id, want := range []float64{10, 20, 30} {
 		assertMetric(t, accelerators[1].Cores[id].Usage, want)
 	}
@@ -182,6 +187,108 @@ scheduler[2]: rga2
 	}
 }
 
+func TestParseRGASessions(t *testing.T) {
+	content := []byte(`num of scheduler = 1
+scheduler[0]: rga3
+	 load = 9%
+<session>  <status>  <tgid>  <process>
+6          active    225320  /opt/builderx/bin/multimedia_broker
+7          active    226399  /opt/video_capture --ros-args -r __node:=real_time_cap12
+`)
+	sessions, err := parseRGASessions(content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 2 {
+		t.Fatalf("sessions = %#v", sessions)
+	}
+	if sessions[0].Session != 6 || sessions[0].Status != "active" ||
+		sessions[0].TGID != 225320 || sessions[0].Process != "/opt/builderx/bin/multimedia_broker" {
+		t.Fatalf("session 0 = %#v", sessions[0])
+	}
+	if sessions[1].Process != "/opt/video_capture --ros-args -r __node:=real_time_cap12" {
+		t.Fatalf("session 1 = %#v", sessions[1])
+	}
+
+	sessions, err = parseRGASessions([]byte("scheduler[0]: rga3\nload = 1%\n"))
+	if err != nil || sessions != nil {
+		t.Fatalf("missing optional session table = %#v, %v", sessions, err)
+	}
+}
+
+func TestParseRGASessionsSkipsMalformedRows(t *testing.T) {
+	content := []byte(`<session> <status> <tgid> <process>
+6 active 225320 broker --serve
+bad active 225321 invalid-session
+7 active nope invalid-tgid
+6 active 225322 duplicate-session
+8 idle 225323 worker
+9 active 225324 bad` + "\x1b" + `[31mprocess
+`)
+	sessions, err := parseRGASessions(content)
+	if len(sessions) != 2 || sessions[0].Session != 6 || sessions[1].Session != 8 {
+		t.Fatalf("sessions = %#v", sessions)
+	}
+	if err == nil || !strings.Contains(err.Error(), "skipped 4 malformed RGA session row(s)") ||
+		!strings.Contains(err.Error(), "invalid session ID") {
+		t.Fatalf("error = %v", err)
+	}
+
+	if sessions, err := parseRGASessions([]byte("<session> <status> <pid> <process>\n")); len(sessions) != 0 || err == nil || !strings.Contains(err.Error(), "malformed RGA session table header") {
+		t.Fatalf("malformed header = %#v, %v", sessions, err)
+	}
+}
+
+func TestParseRGAReportKeepsLoadAndSessionsIndependent(t *testing.T) {
+	timestamp := time.Now()
+	loadOK := []byte(`num of scheduler = 1
+scheduler[0]: rga3
+load = 9%
+<session> <status> <tgid> <process>
+6 active 225320 broker
+bad row
+`)
+	usage, cores, sessions, sessionErr := parseRGAReport(loadOK, "/proc/rkrga/load", timestamp)
+	assertMetric(t, usage, 9)
+	if len(cores) != 1 || len(sessions) != 1 || sessionErr == nil {
+		t.Fatalf("report = cores %#v, sessions %#v, error %v", cores, sessions, sessionErr)
+	}
+
+	loadBad := []byte(`scheduler[0]: rga3
+load = 101%
+<session> <status> <tgid> <process>
+6 active 225320 broker
+`)
+	usage, cores, sessions, sessionErr = parseRGAReport(loadBad, "/proc/rkrga/load", timestamp)
+	if usage.Status != model.Unavailable || len(cores) != 0 || len(sessions) != 1 || sessionErr != nil {
+		t.Fatalf("report = usage %#v, cores %#v, sessions %#v, error %v", usage, cores, sessions, sessionErr)
+	}
+}
+
+func TestCollectorWarnsForMalformedRGASessionRowsWithoutLosingLoad(t *testing.T) {
+	root := filepath.Join("..", "..", "..", "testdata", "generic-linux")
+	collector := NewCollector(&rgaReportFS{
+		SystemFS: sysfs.MustNew(root),
+		report: []byte(`num of scheduler = 1
+scheduler[0]: rga3
+load = 9%
+<session> <status> <tgid> <process>
+6 active 225320 broker
+bad row
+`),
+	})
+	accelerators, warnings := collector.Collect()
+	rga := accelerators[3]
+	assertMetric(t, rga.Usage, 9)
+	if len(rga.Sessions) != 1 || rga.Sessions[0].TGID != 225320 {
+		t.Fatalf("RGA sessions = %#v", rga.Sessions)
+	}
+	if len(warnings) != 1 || warnings[0].Component != rgaType ||
+		!strings.Contains(warnings[0].Message, "skipped 1 malformed RGA session row(s)") {
+		t.Fatalf("warnings = %#v", warnings)
+	}
+}
+
 func TestCollectorCachesMissingRGAProbe(t *testing.T) {
 	root := filepath.Join("..", "..", "..", "testdata", "generic-linux")
 	tracked := &readCountingFS{SystemFS: sysfs.MustNew(root), reads: make(map[string]int)}
@@ -311,6 +418,18 @@ func (f *permissionFS) ReadFile(path string) ([]byte, error) {
 type readCountingFS struct {
 	sysfs.SystemFS
 	reads map[string]int
+}
+
+type rgaReportFS struct {
+	sysfs.SystemFS
+	report []byte
+}
+
+func (f *rgaReportFS) ReadFile(path string) ([]byte, error) {
+	if path == rgaLoadCandidates[0] {
+		return f.report, nil
+	}
+	return f.SystemFS.ReadFile(path)
 }
 
 func (f *readCountingFS) ReadFile(path string) ([]byte, error) {

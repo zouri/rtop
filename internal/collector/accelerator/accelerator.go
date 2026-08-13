@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"rtop/internal/model"
 	"rtop/internal/sysfs"
@@ -118,7 +120,7 @@ func (c *Collector) Collect() ([]model.Accelerator, []model.Warning) {
 }
 
 func (c *Collector) collectRGA(timestamp time.Time) (model.Accelerator, []model.Warning) {
-	usage, cores := c.readRGALoad(timestamp)
+	usage, cores, sessions, sessionErr := c.readRGALoad(timestamp)
 	source := usage.Source
 	if source == "" {
 		source = rgaLoadCandidates[0]
@@ -143,9 +145,15 @@ func (c *Collector) collectRGA(timestamp time.Time) (model.Accelerator, []model.
 	)
 	info := model.Accelerator{
 		Name: "Rockchip RGA", Type: rgaType, Usage: usage, Frequency: frequency,
-		RuntimeStatus: runtimeStatus, DriverVersion: &version, Cores: cores,
+		RuntimeStatus: runtimeStatus, DriverVersion: &version, Cores: cores, Sessions: sessions,
 	}
 	warnings := metricWarnings(rgaType, usage)
+	if sessionErr != nil {
+		warnings = append(warnings, model.Warning{
+			Component: rgaType,
+			Message:   source + ": " + sessionErr.Error(),
+		})
+	}
 	if version.Status == model.PermissionDenied || version.Status == model.Unavailable {
 		warnings = append(warnings, model.Warning{
 			Component: rgaType,
@@ -155,12 +163,14 @@ func (c *Collector) collectRGA(timestamp time.Time) (model.Accelerator, []model.
 	return info, warnings
 }
 
-func (c *Collector) readRGALoad(timestamp time.Time) (model.Metric, []model.AcceleratorCore) {
+func (c *Collector) readRGALoad(timestamp time.Time) (
+	model.Metric, []model.AcceleratorCore, []model.AcceleratorSession, error,
+) {
 	if c.rgaLoadSource != "" {
 		return readRGALoadSource(c.fs, c.rgaLoadSource, timestamp)
 	}
 	if c.rgaLoadMissing != nil {
-		return metricAt(*c.rgaLoadMissing, timestamp), nil
+		return metricAt(*c.rgaLoadMissing, timestamp), nil, nil, nil
 	}
 
 	var bestErr error
@@ -175,30 +185,34 @@ func (c *Collector) readRGALoad(timestamp time.Time) (model.Metric, []model.Acce
 			}
 			continue
 		}
-		loads, parseErr := parseRGALoad(data)
-		if parseErr != nil {
-			metric := model.MissingMetric(model.Unavailable, "%", path, parseErr.Error(), timestamp)
-			c.rgaLoadSource = path
-			return metric, nil
-		}
 		c.rgaLoadSource = path
-		return aggregateNamedCores(loads, path, timestamp)
+		return parseRGAReport(data, path, timestamp)
 	}
 	metric := missingForError(bestErr, "%", bestSource, timestamp)
 	c.rgaLoadMissing = &metric
-	return metric, nil
+	return metric, nil, nil, nil
 }
 
-func readRGALoadSource(systemFS sysfs.SystemFS, path string, timestamp time.Time) (model.Metric, []model.AcceleratorCore) {
+func readRGALoadSource(systemFS sysfs.SystemFS, path string, timestamp time.Time) (
+	model.Metric, []model.AcceleratorCore, []model.AcceleratorSession, error,
+) {
 	data, err := systemFS.ReadFile(path)
 	if err != nil {
-		return missingForError(err, "%", path, timestamp), nil
+		return missingForError(err, "%", path, timestamp), nil, nil, nil
 	}
-	loads, err := parseRGALoad(data)
-	if err != nil {
-		return model.MissingMetric(model.Unavailable, "%", path, err.Error(), timestamp), nil
+	return parseRGAReport(data, path, timestamp)
+}
+
+func parseRGAReport(data []byte, path string, timestamp time.Time) (
+	model.Metric, []model.AcceleratorCore, []model.AcceleratorSession, error,
+) {
+	sessions, sessionErr := parseRGASessions(data)
+	loads, loadErr := parseRGALoad(data)
+	if loadErr != nil {
+		return model.MissingMetric(model.Unavailable, "%", path, loadErr.Error(), timestamp), nil, sessions, sessionErr
 	}
-	return aggregateNamedCores(loads, path, timestamp)
+	usage, cores := aggregateNamedCores(loads, path, timestamp)
+	return usage, cores, sessions, sessionErr
 }
 
 func parseRGALoad(data []byte) ([]model.AcceleratorCore, error) {
@@ -238,6 +252,106 @@ func parseRGALoad(data []byte) ([]model.AcceleratorCore, error) {
 	}
 	sort.Slice(cores, func(i, j int) bool { return cores[i].ID < cores[j].ID })
 	return cores, nil
+}
+
+func parseRGASessions(data []byte) ([]model.AcceleratorSession, error) {
+	lines := strings.Split(string(data), "\n")
+	header := -1
+	for index, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || !strings.EqualFold(fields[0], "<session>") {
+			continue
+		}
+		if len(fields) != 4 ||
+			!strings.EqualFold(fields[1], "<status>") ||
+			!strings.EqualFold(fields[2], "<tgid>") ||
+			!strings.EqualFold(fields[3], "<process>") {
+			return nil, fmt.Errorf("malformed RGA session table header on line %d", index+1)
+		}
+		header = index
+		break
+	}
+	if header < 0 {
+		// Some unified RGA driver versions expose scheduler loads without the
+		// optional session table. Its absence is not a collection failure.
+		return nil, nil
+	}
+
+	sessions := make([]model.AcceleratorSession, 0)
+	seen := make(map[int]struct{})
+	malformedRows := 0
+	firstMalformedLine := 0
+	firstMalformedReason := ""
+	recordMalformed := func(line int, reason string) {
+		malformedRows++
+		if firstMalformedLine == 0 {
+			firstMalformedLine = line
+			firstMalformedReason = reason
+		}
+	}
+
+	for index := header + 1; index < len(lines); index++ {
+		line := strings.TrimSpace(strings.TrimSuffix(lines[index], "\r"))
+		if line == "" || isRGAReportDivider(line) {
+			continue
+		}
+		if !utf8.ValidString(line) || containsUnsafeControl(line) {
+			recordMalformed(index+1, "invalid text encoding or control character")
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			recordMalformed(index+1, "expected session, status, TGID, and process")
+			continue
+		}
+		sessionID, err := strconv.Atoi(fields[0])
+		if err != nil || sessionID < 0 {
+			recordMalformed(index+1, "invalid session ID")
+			continue
+		}
+		tgid, err := strconv.Atoi(fields[2])
+		if err != nil || tgid < 0 {
+			recordMalformed(index+1, "invalid TGID")
+			continue
+		}
+		if _, duplicate := seen[sessionID]; duplicate {
+			recordMalformed(index+1, "duplicate session ID")
+			continue
+		}
+		seen[sessionID] = struct{}{}
+		sessions = append(sessions, model.AcceleratorSession{
+			Session: sessionID,
+			Status:  fields[1],
+			TGID:    tgid,
+			Process: strings.Join(fields[3:], " "),
+		})
+	}
+
+	if malformedRows > 0 {
+		return sessions, fmt.Errorf(
+			"skipped %d malformed RGA session row(s); first error on line %d: %s",
+			malformedRows, firstMalformedLine, firstMalformedReason,
+		)
+	}
+	return sessions, nil
+}
+
+func containsUnsafeControl(value string) bool {
+	for _, character := range value {
+		if unicode.IsControl(character) && character != '\t' {
+			return true
+		}
+	}
+	return false
+}
+
+func isRGAReportDivider(line string) bool {
+	for _, character := range line {
+		if character != '=' && character != '-' && character != ' ' && character != '\t' {
+			return false
+		}
+	}
+	return line != ""
 }
 
 func aggregateNamedCores(cores []model.AcceleratorCore, source string, timestamp time.Time) (model.Metric, []model.AcceleratorCore) {

@@ -13,7 +13,9 @@ CMA、zram、hwmon 电源轨和风扇状态。
 
 当 Rockchip 统一 RGA 驱动暴露 `/sys/kernel/debug/rkrga/load` 或
 `/proc/rkrga/load` 时，rtop 会显示各 scheduler（例如 RGA2、RGA3 core）的
-负载、它们的算术平均负载，并读取同目录的驱动版本。旧 RGA/RGA2 驱动通常没有负载
+负载、它们的算术平均负载、驱动报告的 session 状态、TGID 和进程命令，并读取同目录的驱动
+版本。session 表的异常行会被跳过并报告警告，不会影响 scheduler 负载。该接口不提供
+逐进程利用率，不能把 scheduler 百分比分摊给各进程。旧 RGA/RGA2 驱动通常没有负载
 统计接口，此时会明确显示 `unsupported`，不会根据队列长度估算利用率。
 
 ## 构建

@@ -629,7 +629,27 @@ func enginePanel(accelerator model.Accelerator, history []float64, width int) st
 			builder.WriteString(fmt.Sprintf("\n%-16s %-12s %s", truncateText(label, 16), formatMetric(core.Usage, 1), statusText(core.Usage)))
 		}
 	}
+	for _, line := range acceleratorSessionLines(accelerator.Sessions, inner) {
+		builder.WriteString("\n" + line)
+	}
 	return panel(builder.String(), width)
+}
+
+func acceleratorSessionLines(sessions []model.AcceleratorSession, width int) []string {
+	if len(sessions) == 0 || width <= 0 {
+		return nil
+	}
+	lines := []string{truncateText(fmt.Sprintf("  RGA sessions (%d): # · status · TGID · process", len(sessions)), width)}
+	for _, session := range sessions {
+		status := truncateText(session.Status, 10)
+		prefix := fmt.Sprintf("  #%-3d %-10s %-7d ", session.Session, status, session.TGID)
+		if ansi.StringWidth(prefix) >= width {
+			prefix = fmt.Sprintf("  #%d %s %d ", session.Session, status, session.TGID)
+		}
+		processWidth := max(0, width-ansi.StringWidth(prefix))
+		lines = append(lines, truncateText(prefix, width)+truncateText(session.Process, processWidth))
+	}
+	return lines
 }
 
 func (m Model) engineHistory(acceleratorType string) []float64 {

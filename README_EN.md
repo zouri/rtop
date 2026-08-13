@@ -13,7 +13,10 @@ core is explicitly marked `permission_denied`.
 
 When the unified Rockchip RGA driver exposes `/sys/kernel/debug/rkrga/load` or
 `/proc/rkrga/load`, rtop shows per-scheduler RGA load, their arithmetic mean,
-and the driver version. Older RGA/RGA2 drivers usually lack load accounting;
+reported session status, TGIDs and process commands, and the driver version. Malformed
+session rows are skipped and reported without invalidating scheduler load. The
+interface does not attribute scheduler utilization to individual processes.
+Older RGA/RGA2 drivers usually lack load accounting;
 rtop reports those interfaces as `unsupported` instead of estimating usage.
 
 ## Build

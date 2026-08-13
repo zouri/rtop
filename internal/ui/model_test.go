@@ -803,7 +803,7 @@ func TestDetailPagesRenderDVFSPressureAndThermalControls(t *testing.T) {
 	for currentPage, expected := range map[page][]string{
 		pageCPU:     {"ALL", "600–1800MHz", "schedutil"},
 		pageMemory:  {"CMA", "PSI cpu", "zram0"},
-		pageEngines: {"power active", "simple_ondemand", "RGA", "rga3", "rga2"},
+		pageEngines: {"power active", "simple_ondemand", "RGA", "rga3", "rga2", "RGA sessions", "1234", "compositor --serve"},
 	} {
 		uiModel.page = currentPage
 		view := ansi.Strip(uiModel.View())
@@ -921,6 +921,9 @@ func testSnapshot() model.Snapshot {
 					{ID: 0, Name: "rga3", Usage: model.AvailableMetric(40, "%", "/sys/kernel/debug/rkrga/load", now)},
 					{ID: 1, Name: "rga2", Usage: model.AvailableMetric(20, "%", "/sys/kernel/debug/rkrga/load", now)},
 				},
+				Sessions: []model.AcceleratorSession{{
+					Session: 6, Status: "active", TGID: 1234, Process: "compositor --serve",
+				}},
 			},
 		},
 		Warnings: []model.Warning{},
