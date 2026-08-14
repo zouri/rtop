@@ -35,6 +35,35 @@ jobs:
           path: dist/*
 
       - name: Create GitHub release
+        id: github-release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" dist/* --verify-tag --generate-notes
+        shell: bash
+        run: |
+          gh release create "${{ github.ref_name }}" dist/* --verify-tag --generate-notes
+
+          release_body="$(gh release view "${{ github.ref_name }}" --json body --jq '.body')"
+          if [[ -z "${release_body}" ]]; then
+            release_body="Release ${{ github.ref_name }}"
+          fi
+
+          delimiter="release_notes_$(openssl rand -hex 16)"
+          {
+            printf 'body<<%s\n' "${delimiter}"
+            printf '%s\n' "${release_body}"
+            printf '%s\n' "${delimiter}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Create Gitee release
+        uses: nICEnnnnnnnLee/action-gitee-release@v2.0.0
+        with:
+          gitee_action: create_release
+          gitee_owner: zouri
+          gitee_repo: rtop
+          gitee_token: ${{ secrets.GITEE_TOKEN }}
+          gitee_tag_name: ${{ github.ref_name }}
+          gitee_release_name: ${{ github.ref_name }}
+          gitee_release_body: ${{ steps.github-release.outputs.body }}
+          gitee_target_commitish: ${{ github.sha }}
+          gitee_upload_retry_times: 3
+          gitee_files: dist/*
