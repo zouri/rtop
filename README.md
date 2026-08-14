@@ -26,18 +26,25 @@ go build -buildvcs=false ./cmd/rtop
 
 ## 安装
 
-使用一行命令安装最新的 Linux ARM64 版本：
+从 GitHub 安装最新的 Linux ARM64 版本：
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/zouri/rtop/main/scripts/install.sh | sudo sh
 ```
 
-安装脚本会校验发布包的 SHA-256，并要求使用 root 权限将程序安装到全局路径
-`/usr/bin/rtop`。这样普通用户和 `sudo` 环境都能直接找到该命令。可以通过
-`RTOP_VERSION=v0.1.0` 安装指定版本：
+国内网络也可以从 Gitee 安装。脚本、最新版本信息、安装包和校验文件都会从
+Gitee 获取：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/zouri/rtop/main/scripts/install.sh | sudo env RTOP_VERSION=v0.1.0 sh
+curl -fsSL https://gitee.com/zouri/rtop/raw/main/scripts/install.sh | sudo env RTOP_SOURCE=gitee sh
+```
+
+安装脚本会校验发布包的 SHA-256，并要求使用 root 权限将程序安装到全局路径
+`/usr/bin/rtop`。这样普通用户和 `sudo` 环境都能直接找到该命令。可以通过
+`RTOP_VERSION=v0.2.0` 安装指定版本；该选项同时适用于 GitHub 和 Gitee：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/zouri/rtop/main/scripts/install.sh | sudo env RTOP_VERSION=v0.2.0 sh
 ```
 
 ## 使用

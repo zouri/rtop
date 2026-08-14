@@ -4,6 +4,7 @@ set -eu
 
 repository="${RTOP_REPO:-zouri/rtop}"
 requested_version="${RTOP_VERSION:-latest}"
+download_source="${RTOP_SOURCE:-github}"
 
 fail() {
     printf 'rtop installer: %s\n' "$*" >&2
@@ -27,6 +28,22 @@ download() {
     fi
 }
 
+configure_download_source() {
+    case "$download_source" in
+        github)
+            latest_release_url="https://api.github.com/repos/$repository/releases/latest"
+            release_download_url="https://github.com/$repository/releases/download"
+            ;;
+        gitee)
+            latest_release_url="https://gitee.com/api/v5/repos/$repository/releases/latest"
+            release_download_url="https://gitee.com/$repository/releases/download"
+            ;;
+        *)
+            fail "unsupported RTOP_SOURCE: $download_source (expected github or gitee)"
+            ;;
+    esac
+}
+
 resolve_version() {
     if [ "$requested_version" != "latest" ]; then
         case "$requested_version" in
@@ -37,7 +54,7 @@ resolve_version() {
     fi
 
     metadata="$temporary_directory/release.json"
-    download "https://api.github.com/repos/$repository/releases/latest" "$metadata"
+    download "$latest_release_url" "$metadata"
     version=$(sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$metadata" | head -n 1)
     [ -n "$version" ] || fail "could not determine the latest release for $repository"
     printf '%s\n' "$version"
@@ -70,12 +87,13 @@ esac
 
 [ "$(id -u)" -eq 0 ] || fail "root privileges are required; run the installer with sudo sh"
 command_exists tar || fail "tar is required"
+configure_download_source
 temporary_directory=$(mktemp -d "${TMPDIR:-/tmp}/rtop-install.XXXXXX")
 trap 'rm -rf -- "$temporary_directory"' EXIT HUP INT TERM
 
 version=$(resolve_version)
 archive_name="rtop-$version-linux-arm64.tar.gz"
-release_url="https://github.com/$repository/releases/download/$version"
+release_url="$release_download_url/$version"
 archive_path="$temporary_directory/$archive_name"
 checksum_path="$temporary_directory/SHA256SUMS"
 

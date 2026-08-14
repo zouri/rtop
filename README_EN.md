@@ -27,19 +27,28 @@ go build -buildvcs=false ./cmd/rtop
 
 ## Install
 
-Install the latest Linux ARM64 release with one command:
+Install the latest Linux ARM64 release from GitHub:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/zouri/rtop/main/scripts/install.sh | sudo sh
 ```
 
-The installer verifies the release checksum and requires root privileges to
-install the binary globally as `/usr/bin/rtop`. This keeps the command
-available to both regular users and commands executed through `sudo`. Pass
-`RTOP_VERSION=v0.1.0` to install a specific release:
+When GitHub connectivity is limited, install entirely from the Gitee mirror.
+The script, latest-release metadata, archive, and checksum are all fetched from
+Gitee:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/zouri/rtop/main/scripts/install.sh | sudo env RTOP_VERSION=v0.1.0 sh
+curl -fsSL https://gitee.com/zouri/rtop/raw/main/scripts/install.sh | sudo env RTOP_SOURCE=gitee sh
+```
+
+The installer verifies the release checksum and requires root privileges to
+install the binary globally as `/usr/bin/rtop`. This keeps the command
+available to both regular users and commands executed through `sudo`.
+`RTOP_VERSION` works with both GitHub and Gitee; pass `RTOP_VERSION=v0.2.0` to
+install a specific release:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/zouri/rtop/main/scripts/install.sh | sudo env RTOP_VERSION=v0.2.0 sh
 ```
 
 ## Usage
