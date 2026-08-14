@@ -19,6 +19,23 @@ interface does not attribute scheduler utilization to individual processes.
 Older RGA/RGA2 drivers usually lack load accounting;
 rtop reports those interfaces as `unsupported` instead of estimating usage.
 
+## Screenshots
+
+These screenshots use the real rtop TUI rendered with representative RK3588
+data. Click an image to view it at full size.
+
+### System overview
+
+[![rtop system overview](docs/images/rtop-overview.png)](docs/images/rtop-overview.png)
+
+### Memory and pressure
+
+[![rtop memory and pressure monitoring](docs/images/rtop-memory.png)](docs/images/rtop-memory.png)
+
+### Rockchip engines
+
+[![rtop Rockchip GPU, NPU, DDR, and RGA monitoring](docs/images/rtop-engines.png)](docs/images/rtop-engines.png)
+
 ## Build
 
 ```sh

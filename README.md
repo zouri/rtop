@@ -18,6 +18,22 @@ CMA、zram、hwmon 电源轨和风扇状态。
 逐进程利用率，不能把 scheduler 百分比分摊给各进程。旧 RGA/RGA2 驱动通常没有负载
 统计接口，此时会明确显示 `unsupported`，不会根据队列长度估算利用率。
 
+## 截图
+
+以下截图由 rtop 的实际 TUI 使用 RK3588 示例数据渲染。点击图片可查看原图。
+
+### 系统总览
+
+[![rtop 系统总览](docs/images/rtop-overview.png)](docs/images/rtop-overview.png)
+
+### 内存与压力
+
+[![rtop 内存与压力监控](docs/images/rtop-memory.png)](docs/images/rtop-memory.png)
+
+### Rockchip 计算引擎
+
+[![rtop Rockchip GPU、NPU、DDR 和 RGA 监控](docs/images/rtop-engines.png)](docs/images/rtop-engines.png)
+
 ## 构建
 
 ```sh
