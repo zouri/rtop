@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"io"
+	"os"
 	"sort"
 
 	"github.com/charmbracelet/bubbles/help"
@@ -31,12 +32,14 @@ const (
 )
 
 type Model struct {
-	snapshots    <-chan model.Snapshot
-	refresh      func()
-	scopeChanged func(model.CollectionScope)
-	latest       model.Snapshot
-	hasData      bool
-	closed       bool
+	snapshots     <-chan model.Snapshot
+	refresh       func()
+	scopeChanged  func(model.CollectionScope)
+	latest        model.Snapshot
+	hasData       bool
+	closed        bool
+	unprivileged  bool
+	accessLimited bool
 
 	width              int
 	height             int
@@ -87,6 +90,7 @@ func NewModelWithScope(
 	return Model{
 		snapshots: snapshots, refresh: refresh, scopeChanged: scopeChanged,
 		keys: newKeyMap(), help: helper, coreHistory: make(map[int][]float64),
+		unprivileged: os.Geteuid() != 0,
 	}
 }
 
@@ -338,6 +342,7 @@ func (m *Model) mergeSnapshot(snapshot model.Snapshot, scope model.CollectionSco
 		m.latest.Power = snapshot.Power
 		m.latest.Fans = snapshot.Fans
 	}
+	m.accessLimited = m.unprivileged && snapshotHasPermissionDenied(m.latest)
 }
 
 func (m *Model) clampSelection() {

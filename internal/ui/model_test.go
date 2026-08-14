@@ -352,6 +352,88 @@ func TestPageTabsRenderOnBottomLine(t *testing.T) {
 	}
 }
 
+func TestPermissionNoticeOnlyAppearsForUnprivilegedDeniedMetrics(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		unprivileged   bool
+		permissionLost bool
+		wantNotice     bool
+	}{
+		{name: "standard user with denied metric", unprivileged: true, permissionLost: true, wantNotice: true},
+		{name: "standard user with readable metrics", unprivileged: true, wantNotice: false},
+		{name: "root with denied metric", permissionLost: true, wantNotice: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			snapshot := testSnapshot()
+			if test.permissionLost {
+				snapshot.Accelerators[1].Cores[0].Usage = model.MissingMetric(
+					model.PermissionDenied, "%", "/sys/kernel/debug/rknpu/load",
+					"permission denied", snapshot.Timestamp,
+				)
+			}
+
+			uiModel := NewModel(make(chan model.Snapshot), nil)
+			uiModel.unprivileged = test.unprivileged
+			updated, _ := uiModel.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+			uiModel = updated.(Model)
+			updated, _ = uiModel.Update(snapshotMsg{snapshot: snapshot})
+			uiModel = updated.(Model)
+
+			view := ansi.Strip(uiModel.View())
+			if got := strings.Contains(view, "LIMITED"); got != test.wantNotice {
+				t.Fatalf("permission notice present=%v, want %v:\n%s", got, test.wantNotice, view)
+			}
+			if uiModel.accessLimited != test.wantNotice {
+				t.Fatalf("accessLimited=%v, want %v", uiModel.accessLimited, test.wantNotice)
+			}
+			if test.wantNotice && !strings.Contains(view, "sudo rtop") {
+				t.Fatalf("permission notice has no remediation command:\n%s", view)
+			}
+			if test.wantNotice {
+				firstLine := strings.Split(view, "\n")[0]
+				if !strings.HasSuffix(firstLine, "sudo rtop") {
+					t.Fatalf("permission notice is not right-aligned in the header: %q", firstLine)
+				}
+			}
+		})
+	}
+}
+
+func TestPermissionNoticeAddsAccessDetailsAndFitsNarrowTerminal(t *testing.T) {
+	snapshot := testSnapshot()
+	snapshot.Fans[0].ControlMode = model.MissingTextMetric(
+		model.PermissionDenied, "/sys/class/hwmon/hwmon0/pwm1_enable",
+		"permission denied", snapshot.Timestamp,
+	)
+	if !snapshotHasPermissionDenied(snapshot) {
+		t.Fatal("nested text metric permission denial was not detected")
+	}
+
+	uiModel := NewModel(make(chan model.Snapshot), nil)
+	uiModel.unprivileged = true
+	updated, _ := uiModel.Update(tea.WindowSizeMsg{Width: 24, Height: 8})
+	uiModel = updated.(Model)
+	updated, _ = uiModel.Update(snapshotMsg{snapshot: snapshot})
+	uiModel = updated.(Model)
+	view := ansi.Strip(uiModel.View())
+	for _, expected := range []string{"LIMITED"} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("narrow permission notice is missing %q:\n%s", expected, view)
+		}
+	}
+	assertViewFitsTerminal(t, uiModel)
+
+	updated, _ = uiModel.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	uiModel = updated.(Model)
+	uiModel.setPage(pageInfo)
+	view = ansi.Strip(uiModel.View())
+	for _, expected := range []string{"Access", "standard user", "Status: limited", "rtop doctor"} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("INFO access details are missing %q:\n%s", expected, view)
+		}
+	}
+}
+
 func TestJtopPageCyclingKeys(t *testing.T) {
 	notifications := make([]model.CollectionScope, 0, 3)
 	uiModel := NewModelWithScope(make(chan model.Snapshot), nil, func(scope model.CollectionScope) {

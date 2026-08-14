@@ -99,7 +99,27 @@ func (m Model) renderHeader() string {
 	if m.latest.System.Kernel != "" {
 		left += " [" + m.latest.System.Kernel + "]"
 	}
-	return ansi.Truncate(titleStyle.Render(left), m.width, "") + "\n"
+	header := titleStyle.Render(left)
+	if !m.accessLimited {
+		return ansi.Truncate(header, m.width, "") + "\n"
+	}
+	badge := "⚠ LIMITED · sudo rtop"
+	if m.width < 48 {
+		badge = "⚠ LIMITED"
+	}
+	return rightAlignHeader(header, warnStyle.Bold(true).Render(badge), m.width) + "\n"
+}
+
+func rightAlignHeader(left, right string, width int) string {
+	width = max(1, width)
+	right = ansi.Truncate(right, width, "")
+	rightWidth := ansi.StringWidth(right)
+	if rightWidth >= width {
+		return right
+	}
+	left = ansi.Truncate(left, width-rightWidth-1, "")
+	gap := max(1, width-ansi.StringWidth(left)-rightWidth)
+	return left + strings.Repeat(" ", gap) + right
 }
 
 func (m Model) renderTabs() string {

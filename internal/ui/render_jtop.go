@@ -890,6 +890,16 @@ func (m Model) renderJtopInfo(_ int) string {
 	for _, driver := range m.latest.System.Drivers {
 		right = append(right, fmt.Sprintf("  %-8s %s", driver.Type+":", fallback(driver.Name, driver.Device)))
 	}
+	if m.accessLimited {
+		left = append(left,
+			"",
+			warnStyle.Render("Access"),
+			"  Mode:   standard user",
+			"  Status: limited",
+			"  Hint:   sudo rtop for more metrics",
+			"  Check:  rtop doctor",
+		)
+	}
 	if len(m.latest.Warnings) > 0 {
 		left = append(left, "", warnStyle.Render("Diagnostics"))
 		for _, warning := range m.latest.Warnings {
