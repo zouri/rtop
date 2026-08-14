@@ -63,7 +63,9 @@ resize hint instead of drawing clipped panels.
 
 - `1`: ALL board overview.
 - `2`: total CPU load, per-core history charts, frequency ranges, and governors.
-- `3`: memory history, swap, CMA, PSI, zram, and DDR status.
+- `3`: `free`-style `total / used / free / shared / buff/cache / available` and swap
+  details, plus buffers, cache, swap cache, CMA, PSI, zram, and DDR status. The
+  memory history uses jtop-style colors for used, shared, buffers, and cache.
 - `4`: Rockchip engine load, frequency, devfreq policy, runtime state, and per-core status.
 - `5`: process table.
 - `6` or `i`: board, driver and metric-source information.

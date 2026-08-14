@@ -27,7 +27,7 @@ func TestCommandJSONModesAgainstFixture(t *testing.T) {
 		{
 			name:     "snapshot",
 			args:     []string{"--root", root, "--cpu-sample", "1ns", "snapshot", "--json"},
-			contains: []string{`"cpu":`, `"memory":`, `"accelerators":`, `"pressure":`, `"cma_total":`, `"zram":`, `"trips":`, `"cooling_devices":`, `"runtime_status":`, `"power_sensors":`, `"fans":`},
+			contains: []string{`"cpu":`, `"memory":`, `"free":`, `"shared":`, `"buff_cache":`, `"swap_free":`, `"swap_cached":`, `"accelerators":`, `"pressure":`, `"cma_total":`, `"zram":`, `"trips":`, `"cooling_devices":`, `"runtime_status":`, `"power_sensors":`, `"fans":`},
 		},
 		{
 			name:     "snapshot without processes",
@@ -87,6 +87,29 @@ func TestPrintSnapshotIncludesAcceleratorSessions(t *testing.T) {
 	})
 	if !strings.Contains(output.String(), "session 6: status active  TGID 225320  process /opt/broker --serve") {
 		t.Fatalf("snapshot output is missing RGA session:\n%s", output.String())
+	}
+}
+
+func TestPrintSnapshotIncludesFreeMemoryBreakdown(t *testing.T) {
+	now := time.Now()
+	metric := func(value float64) model.Metric {
+		return model.AvailableMetric(value, "MiB", "/proc/meminfo", now)
+	}
+	var output bytes.Buffer
+	printSnapshot(&output, model.Snapshot{Memory: model.MemoryInfo{
+		Total: metric(8000), Used: metric(4000), Free: metric(1000), Shared: metric(64),
+		Buffers: metric(250), Cache: metric(2125), BufferCache: metric(2375), Available: metric(4000),
+		SwapTotal: metric(2000), SwapUsed: metric(500), SwapFree: metric(1500), SwapCached: metric(32),
+	}})
+	view := output.String()
+	for _, expected := range []string{
+		"1000MiB free", "64MiB shared", "2375MiB buff/cache", "4000MiB available",
+		"250MiB buffers", "2125MiB cache", "2000MiB total", "500MiB used",
+		"1500MiB free", "32MiB cached",
+	} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("snapshot output is missing %q:\n%s", expected, view)
+		}
 	}
 }
 

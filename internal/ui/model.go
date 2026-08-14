@@ -51,13 +51,17 @@ type Model struct {
 	topCPUProcesses    []model.ProcessInfo
 	topMemoryProcesses []model.ProcessInfo
 
-	cpuHistory    []float64
-	coreHistory   map[int][]float64
-	memoryHistory []float64
-	gpuHistory    []float64
-	npuHistory    []float64
-	ddrHistory    []float64
-	rgaHistory    []float64
+	cpuHistory          []float64
+	coreHistory         map[int][]float64
+	memoryHistory       []float64
+	memoryUsedHistory   []float64
+	memorySharedHistory []float64
+	memoryBufferHistory []float64
+	memoryCacheHistory  []float64
+	gpuHistory          []float64
+	npuHistory          []float64
+	ddrHistory          []float64
+	rgaHistory          []float64
 
 	keys keyMap
 	help help.Model
@@ -424,6 +428,14 @@ func (m *Model) addHistory(snapshot model.Snapshot) {
 	}
 	if scope.Includes(model.CollectMemory) {
 		m.memoryHistory = appendHistory(m.memoryHistory, memoryPercent(snapshot.Memory))
+		breakdown, ok := memoryBreakdownPercentages(snapshot.Memory)
+		if !ok {
+			breakdown = memoryBreakdown{used: -1, shared: -1, buffers: -1, cache: -1}
+		}
+		m.memoryUsedHistory = appendHistory(m.memoryUsedHistory, breakdown.used)
+		m.memorySharedHistory = appendHistory(m.memorySharedHistory, breakdown.shared)
+		m.memoryBufferHistory = appendHistory(m.memoryBufferHistory, breakdown.buffers)
+		m.memoryCacheHistory = appendHistory(m.memoryCacheHistory, breakdown.cache)
 	}
 	if scope.Includes(model.CollectAccelerators) {
 		values := map[string]float64{"gpu": -1, "npu": -1, "ddr": -1, "rga": -1}
@@ -447,6 +459,43 @@ func appendHistory(history []float64, value float64) []float64 {
 	copy(history, history[1:])
 	history[len(history)-1] = value
 	return history
+}
+
+type memoryBreakdown struct {
+	used    float64
+	shared  float64
+	buffers float64
+	cache   float64
+}
+
+// memoryBreakdownPercentages follows jtop's stacked RAM chart: non-cache used
+// memory at the bottom, followed by shared memory, buffers, and cache. Values
+// are made disjoint so the stack represents total resident RAM without double
+// counting reclaimable memory.
+func memoryBreakdownPercentages(memory model.MemoryInfo) (memoryBreakdown, bool) {
+	total := metricNumber(memory.Total)
+	free := metricNumber(memory.Free)
+	shared := metricNumber(memory.Shared)
+	buffers := metricNumber(memory.Buffers)
+	cache := metricNumber(memory.Cache)
+	if total <= 0 || free < 0 || shared < 0 || buffers < 0 || cache < 0 {
+		return memoryBreakdown{}, false
+	}
+
+	free = min(total, max(0, free))
+	occupied := total - free
+	cache = min(occupied, max(0, cache))
+	buffers = min(occupied-cache, max(0, buffers))
+	nonCache := occupied - cache - buffers
+	shared = min(nonCache, max(0, shared))
+	used := nonCache - shared
+
+	return memoryBreakdown{
+		used:    used * 100 / total,
+		shared:  shared * 100 / total,
+		buffers: buffers * 100 / total,
+		cache:   cache * 100 / total,
+	}, true
 }
 
 func Run(

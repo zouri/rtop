@@ -333,10 +333,23 @@ func printSnapshot(writer io.Writer, snapshot model.Snapshot) {
 			fmt.Fprintf(writer, "  cpu%d policy: %s\n", core.ID, policy)
 		}
 	}
-	fmt.Fprintf(writer, "Memory: %s used / %s total  Swap: %s used\n",
-		formatMetric(snapshot.Memory.Used, 0),
+	fmt.Fprintf(writer, "Memory: %s total  %s used  %s free  %s shared  %s buff/cache  %s available\n",
 		formatMetric(snapshot.Memory.Total, 0),
+		formatMetric(snapshot.Memory.Used, 0),
+		formatMetric(snapshot.Memory.Free, 0),
+		formatMetric(snapshot.Memory.Shared, 0),
+		formatMetric(snapshot.Memory.BufferCache, 0),
+		formatMetric(snapshot.Memory.Available, 0),
+	)
+	fmt.Fprintf(writer, "Cache: %s buffers  %s cache\n",
+		formatMetric(snapshot.Memory.Buffers, 0),
+		formatMetric(snapshot.Memory.Cache, 0),
+	)
+	fmt.Fprintf(writer, "Swap: %s total  %s used  %s free  %s cached\n",
+		formatMetric(snapshot.Memory.SwapTotal, 0),
 		formatMetric(snapshot.Memory.SwapUsed, 0),
+		formatMetric(snapshot.Memory.SwapFree, 0),
+		formatMetric(snapshot.Memory.SwapCached, 0),
 	)
 	if snapshot.Memory.CMATotal.Status == model.Available {
 		fmt.Fprintf(writer, "CMA: %s used / %s total\n",

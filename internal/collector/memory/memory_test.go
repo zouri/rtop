@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"rtop/internal/model"
 	"rtop/internal/sysfs"
@@ -86,6 +87,25 @@ func TestCollectorFromFixture(t *testing.T) {
 	if memoryInfo.Used.Value == nil || *memoryInfo.Used.Value != 4000 {
 		t.Fatalf("used = %#v", memoryInfo.Used)
 	}
+	for name, test := range map[string]struct {
+		metric model.Metric
+		want   float64
+	}{
+		"free":        {memoryInfo.Free, 1000},
+		"shared":      {memoryInfo.Shared, 62.5},
+		"buffers":     {memoryInfo.Buffers, 250},
+		"cache":       {memoryInfo.Cache, 2125},
+		"buff/cache":  {memoryInfo.BufferCache, 2375},
+		"available":   {memoryInfo.Available, 4000},
+		"swap total":  {memoryInfo.SwapTotal, 2000},
+		"swap used":   {memoryInfo.SwapUsed, 500},
+		"swap free":   {memoryInfo.SwapFree, 1500},
+		"swap cached": {memoryInfo.SwapCached, 0},
+	} {
+		if test.metric.Status != model.Available || test.metric.Value == nil || *test.metric.Value != test.want {
+			t.Errorf("%s = %#v, want %.1f MiB", name, test.metric, test.want)
+		}
+	}
 	if loadInfo.Tasks.Value == nil || *loadInfo.Tasks.Value != 512 {
 		t.Fatalf("tasks = %#v", loadInfo.Tasks)
 	}
@@ -103,6 +123,33 @@ func TestCollectorFromFixture(t *testing.T) {
 		*memoryInfo.ZRAM[0].MemoryUsed.Value != 224 || memoryInfo.ZRAM[0].Algorithm.Value == nil ||
 		*memoryInfo.ZRAM[0].Algorithm.Value != "zstd" {
 		t.Fatalf("zram = %#v", memoryInfo.ZRAM)
+	}
+}
+
+func TestCollectorDoesNotReportMissingBreakdownFieldsAsZero(t *testing.T) {
+	root := t.TempDir()
+	proc := filepath.Join(root, "proc")
+	if err := os.MkdirAll(proc, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte("MemTotal: 1024 kB\nMemFree: 256 kB\nBuffers: 64 kB\nCached: 128 kB\nSwapTotal: 512 kB\nSwapFree: 256 kB\n")
+	if err := os.WriteFile(filepath.Join(proc, "meminfo"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	memoryInfo, warning := NewCollector(sysfs.MustNew(root)).collectMemory(time.Now())
+	if warning != nil {
+		t.Fatalf("unexpected warning: %#v", warning)
+	}
+	for name, metric := range map[string]model.Metric{
+		"shared": memoryInfo.Shared, "swap cached": memoryInfo.SwapCached,
+	} {
+		if metric.Status != model.Unsupported || metric.Value != nil {
+			t.Errorf("missing %s = %#v, want unsupported without a value", name, metric)
+		}
+	}
+	if memoryInfo.Cache.Status != model.Available || memoryInfo.BufferCache.Status != model.Available {
+		t.Fatalf("derived cache metrics = cache %#v buff/cache %#v", memoryInfo.Cache, memoryInfo.BufferCache)
 	}
 }
 

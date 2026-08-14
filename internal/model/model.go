@@ -122,17 +122,26 @@ type CPUInfo struct {
 	Cores   []CPUCore `json:"cores"`
 }
 
+// MemoryInfo exposes the core column set used by procps free. Cache contains
+// Cached + SReclaimable, while BufferCache additionally includes Buffers.
 type MemoryInfo struct {
-	Total     Metric       `json:"total"`
-	Used      Metric       `json:"used"`
-	Available Metric       `json:"available"`
-	SwapTotal Metric       `json:"swap_total"`
-	SwapUsed  Metric       `json:"swap_used"`
-	CMATotal  Metric       `json:"cma_total"`
-	CMAUsed   Metric       `json:"cma_used"`
-	CMAFree   Metric       `json:"cma_free"`
-	Pressure  PressureInfo `json:"pressure"`
-	ZRAM      []ZRAMDevice `json:"zram"`
+	Total       Metric       `json:"total"`
+	Used        Metric       `json:"used"`
+	Free        Metric       `json:"free"`
+	Shared      Metric       `json:"shared"`
+	Buffers     Metric       `json:"buffers"`
+	Cache       Metric       `json:"cache"`
+	BufferCache Metric       `json:"buff_cache"`
+	Available   Metric       `json:"available"`
+	SwapTotal   Metric       `json:"swap_total"`
+	SwapUsed    Metric       `json:"swap_used"`
+	SwapFree    Metric       `json:"swap_free"`
+	SwapCached  Metric       `json:"swap_cached"`
+	CMATotal    Metric       `json:"cma_total"`
+	CMAUsed     Metric       `json:"cma_used"`
+	CMAFree     Metric       `json:"cma_free"`
+	Pressure    PressureInfo `json:"pressure"`
+	ZRAM        []ZRAMDevice `json:"zram"`
 }
 
 // FrequencyPolicy describes the active software limits and the immutable

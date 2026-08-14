@@ -205,20 +205,47 @@ func (c *Collector) collectMemory(timestamp time.Time) (model.MemoryInfo, *model
 	}
 
 	total := values["MemTotal"]
-	available, ok := values["MemAvailable"]
-	if !ok {
+	_, freeOK := values["MemFree"]
+	buffers, buffersOK := values["Buffers"]
+	cached, cachedOK := values["Cached"]
+	cache := cached + values["SReclaimable"]
+	bufferCache := buffers + cache
+
+	available, availableOK := values["MemAvailable"]
+	if !availableOK && freeOK && buffersOK && cachedOK {
 		available = sum(values, "MemFree", "Buffers", "Cached", "SReclaimable")
 		if shmem := values["Shmem"]; available >= shmem {
 			available -= shmem
 		}
+		availableOK = true
 	}
 	if available > total {
 		available = total
 	}
-	swapTotal := values["SwapTotal"]
-	swapFree := values["SwapFree"]
-	if swapFree > swapTotal {
+
+	usedMetric := missingMeminfoMetric("MemAvailable and fallback fields are not exposed", timestamp)
+	availableMetric := missingMeminfoMetric("MemAvailable and fallback fields are not exposed", timestamp)
+	if availableOK {
+		usedMetric = bytesMetric(total-available, meminfoPath, timestamp)
+		availableMetric = bytesMetric(available, meminfoPath, timestamp)
+	}
+	cacheMetric := missingMeminfoMetric("Cached is not exposed", timestamp)
+	if cachedOK {
+		cacheMetric = bytesMetric(cache, meminfoPath, timestamp)
+	}
+	bufferCacheMetric := missingMeminfoMetric("Buffers or Cached is not exposed", timestamp)
+	if buffersOK && cachedOK {
+		bufferCacheMetric = bytesMetric(bufferCache, meminfoPath, timestamp)
+	}
+
+	swapTotal, swapTotalOK := values["SwapTotal"]
+	swapFree, swapFreeOK := values["SwapFree"]
+	if swapTotalOK && swapFreeOK && swapFree > swapTotal {
 		swapFree = swapTotal
+	}
+	swapUsedMetric := missingMeminfoMetric("SwapTotal or SwapFree is not exposed", timestamp)
+	if swapTotalOK && swapFreeOK {
+		swapUsedMetric = bytesMetric(swapTotal-swapFree, meminfoPath, timestamp)
 	}
 
 	cmaTotalMetric := model.MissingMetric(model.Unsupported, "MiB", meminfoPath, "CmaTotal is not exposed", timestamp)
@@ -236,14 +263,21 @@ func (c *Collector) collectMemory(timestamp time.Time) (model.MemoryInfo, *model
 	}
 
 	return model.MemoryInfo{
-		Total:     bytesMetric(total, meminfoPath, timestamp),
-		Used:      bytesMetric(total-available, meminfoPath, timestamp),
-		Available: bytesMetric(available, meminfoPath, timestamp),
-		SwapTotal: bytesMetric(swapTotal, meminfoPath, timestamp),
-		SwapUsed:  bytesMetric(swapTotal-swapFree, meminfoPath, timestamp),
-		CMATotal:  cmaTotalMetric,
-		CMAUsed:   cmaUsedMetric,
-		CMAFree:   cmaFreeMetric,
+		Total:       bytesMetric(total, meminfoPath, timestamp),
+		Used:        usedMetric,
+		Free:        meminfoBytesMetric(values, "MemFree", timestamp),
+		Shared:      meminfoBytesMetric(values, "Shmem", timestamp),
+		Buffers:     meminfoBytesMetric(values, "Buffers", timestamp),
+		Cache:       cacheMetric,
+		BufferCache: bufferCacheMetric,
+		Available:   availableMetric,
+		SwapTotal:   meminfoBytesMetric(values, "SwapTotal", timestamp),
+		SwapUsed:    swapUsedMetric,
+		SwapFree:    metricOrMissing(swapFree, swapFreeOK, "SwapFree is not exposed", timestamp),
+		SwapCached:  meminfoBytesMetric(values, "SwapCached", timestamp),
+		CMATotal:    cmaTotalMetric,
+		CMAUsed:     cmaUsedMetric,
+		CMAFree:     cmaFreeMetric,
 	}, nil
 }
 
@@ -431,13 +465,31 @@ func bytesMetric(value uint64, source string, timestamp time.Time) model.Metric 
 	return rawBytesMetric(value, source, timestamp)
 }
 
+func meminfoBytesMetric(values map[string]uint64, key string, timestamp time.Time) model.Metric {
+	value, ok := values[key]
+	return metricOrMissing(value, ok, key+" is not exposed", timestamp)
+}
+
+func metricOrMissing(value uint64, ok bool, message string, timestamp time.Time) model.Metric {
+	if !ok {
+		return missingMeminfoMetric(message, timestamp)
+	}
+	return bytesMetric(value, meminfoPath, timestamp)
+}
+
+func missingMeminfoMetric(message string, timestamp time.Time) model.Metric {
+	return model.MissingMetric(model.Unsupported, "MiB", meminfoPath, message, timestamp)
+}
+
 func unavailableMemory(timestamp time.Time, status model.MetricStatus, message string) model.MemoryInfo {
 	metric := func() model.Metric {
 		return model.MissingMetric(status, "MiB", meminfoPath, message, timestamp)
 	}
 	return model.MemoryInfo{
-		Total: metric(), Used: metric(), Available: metric(), SwapTotal: metric(), SwapUsed: metric(),
-		CMATotal: metric(), CMAUsed: metric(), CMAFree: metric(), ZRAM: []model.ZRAMDevice{},
+		Total: metric(), Used: metric(), Free: metric(), Shared: metric(), Buffers: metric(),
+		Cache: metric(), BufferCache: metric(), Available: metric(), SwapTotal: metric(),
+		SwapUsed: metric(), SwapFree: metric(), SwapCached: metric(), CMATotal: metric(),
+		CMAUsed: metric(), CMAFree: metric(), ZRAM: []model.ZRAMDevice{},
 	}
 }
 

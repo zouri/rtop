@@ -60,7 +60,9 @@ rtop doctor --json
 
 - `1`：ALL，开发板总览。
 - `2`：CPU 总负载、逐核历史图、频率范围与调速器。
-- `3`：内存历史图、Swap、CMA、PSI、zram 及 DDR 状态。
+- `3`：与 `free` 对齐的 `total / used / free / shared / buff/cache / available` 与 Swap 明细，
+  以及 buffers、cache、swap cache、CMA、PSI、zram、DDR 状态；内存历史图按 jtop
+  的配色区分 used、shared、buffers 和 cache。
 - `4`：Rockchip 计算引擎的负载、频率、devfreq 策略、运行状态和逐核状态。
 - `5`：进程列表。
 - `6` 或 `i`：开发板、驱动和指标来源信息。

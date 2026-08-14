@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -44,8 +45,49 @@ func TestHistoryIsBounded(t *testing.T) {
 	for range 150 {
 		uiModel.addHistory(testSnapshot())
 	}
-	if len(uiModel.cpuHistory) != 120 || len(uiModel.coreHistory[0]) != 120 || len(uiModel.memoryHistory) != 120 || len(uiModel.gpuHistory) != 120 || len(uiModel.rgaHistory) != 120 {
-		t.Fatalf("history lengths cpu=%d memory=%d gpu=%d rga=%d", len(uiModel.cpuHistory), len(uiModel.memoryHistory), len(uiModel.gpuHistory), len(uiModel.rgaHistory))
+	if len(uiModel.cpuHistory) != 120 || len(uiModel.coreHistory[0]) != 120 ||
+		len(uiModel.memoryHistory) != 120 || len(uiModel.memoryUsedHistory) != 120 ||
+		len(uiModel.memorySharedHistory) != 120 || len(uiModel.memoryBufferHistory) != 120 ||
+		len(uiModel.memoryCacheHistory) != 120 || len(uiModel.gpuHistory) != 120 ||
+		len(uiModel.rgaHistory) != 120 {
+		t.Fatalf("history lengths cpu=%d memory=%d/%d/%d/%d/%d gpu=%d rga=%d",
+			len(uiModel.cpuHistory), len(uiModel.memoryHistory), len(uiModel.memoryUsedHistory),
+			len(uiModel.memorySharedHistory), len(uiModel.memoryBufferHistory),
+			len(uiModel.memoryCacheHistory), len(uiModel.gpuHistory), len(uiModel.rgaHistory))
+	}
+}
+
+func TestMemoryChartUsesJtopBreakdownAndLayers(t *testing.T) {
+	breakdown, ok := memoryBreakdownPercentages(testSnapshot().Memory)
+	if !ok {
+		t.Fatal("memory breakdown is unavailable")
+	}
+	for name, test := range map[string]struct {
+		got  float64
+		want float64
+	}{
+		"used": {breakdown.used, 57.0125}, "shared": {breakdown.shared, 0.8},
+		"buffers": {breakdown.buffers, 3.125}, "cache": {breakdown.cache, 26.5625},
+	} {
+		if math.Abs(test.got-test.want) > 0.0001 {
+			t.Errorf("%s = %.4f%%, want %.4f%%", name, test.got, test.want)
+		}
+	}
+
+	point := memoryBreakdown{used: 25, shared: 25, buffers: 25, cache: 25}
+	for _, test := range []struct {
+		threshold float64
+		want      memoryChartLayer
+	}{
+		{10, memoryChartUsed}, {30, memoryChartShared}, {55, memoryChartBuffers},
+		{80, memoryChartCache}, {100, memoryChartEmpty},
+	} {
+		if got := memoryChartLayerAt(point, test.threshold); got != test.want {
+			t.Errorf("layer at %.0f%% = %d, want %d", test.threshold, got, test.want)
+		}
+	}
+	if colorPrimary == colorCache || colorBuffer == colorCache || colorPrimary == colorBuffer {
+		t.Fatal("used, buffers, and cache chart colors are not distinct")
 	}
 }
 
@@ -146,7 +188,10 @@ func TestPageCollectionScopesAndNotifications(t *testing.T) {
 func TestHistoryIgnoresSnapshotsWithoutTrackedMetrics(t *testing.T) {
 	uiModel := NewModel(make(chan model.Snapshot), nil)
 	uiModel.addHistory(model.Snapshot{})
-	if len(uiModel.cpuHistory) != 0 || len(uiModel.memoryHistory) != 0 || len(uiModel.gpuHistory) != 0 || len(uiModel.rgaHistory) != 0 {
+	if len(uiModel.cpuHistory) != 0 || len(uiModel.memoryHistory) != 0 ||
+		len(uiModel.memoryUsedHistory) != 0 || len(uiModel.memorySharedHistory) != 0 ||
+		len(uiModel.memoryBufferHistory) != 0 || len(uiModel.memoryCacheHistory) != 0 ||
+		len(uiModel.gpuHistory) != 0 || len(uiModel.rgaHistory) != 0 {
 		t.Fatalf("unexpected history for empty snapshot")
 	}
 }
@@ -716,7 +761,11 @@ func TestCPUAndMemoryPagesUseJtopCharts(t *testing.T) {
 		values  []string
 	}{
 		{current: pageCPU, values: []string{"ALL", "Frq", "schedutil", "1800MHz"}},
-		{current: pageMemory, values: []string{"RAM", "Used:", "SWAP", "zram0", "PSI cpu"}},
+		{current: pageMemory, values: []string{
+			"RAM", "Used:", "total", "free", "shared", "buff/cache", "available",
+			"Buffers:", "Cache:", "SWAP", "Swap cache:", "■ used", "■ shared",
+			"■ buffers", "■ cache", "zram0", "PSI cpu",
+		}},
 	} {
 		uiModel.setPage(test.current)
 		view := ansi.Strip(uiModel.View())
@@ -754,6 +803,34 @@ func TestMemoryPageUsesFullWidthRows(t *testing.T) {
 	}
 	if fullWidthCards != 2 {
 		t.Fatalf("full-width memory cards = %d, want 2:\n%s", fullWidthCards, view)
+	}
+}
+
+func TestMemorySummaryKeepsFreeFieldsAtWideAndNarrowWidths(t *testing.T) {
+	memory := testSnapshot().Memory
+	for _, width := range []int{40, 100} {
+		view := ansi.Strip(jtopMemorySummary(memory, width))
+		lower := strings.ToLower(view)
+		for _, expected := range []string{
+			"ram", "total", "used", "free", "shared", "buff/cache", "available",
+			"buffers", "cache", "swap", "8000mib", "1500mib", "32mib",
+		} {
+			if !strings.Contains(lower, expected) {
+				t.Fatalf("%d-column memory summary is missing %q:\n%s", width, expected, view)
+			}
+		}
+		swapCacheLabel := "cached"
+		if width >= 72 {
+			swapCacheLabel = "swap cache"
+		}
+		if !strings.Contains(lower, swapCacheLabel) {
+			t.Fatalf("%d-column memory summary is missing %q:\n%s", width, swapCacheLabel, view)
+		}
+		for lineNumber, line := range strings.Split(view, "\n") {
+			if got := ansi.StringWidth(line); got > width {
+				t.Fatalf("%d-column summary line %d is %d cells: %q", width, lineNumber+1, got, line)
+			}
+		}
 	}
 }
 
@@ -839,14 +916,21 @@ func testSnapshot() model.Snapshot {
 			}},
 		},
 		Memory: model.MemoryInfo{
-			Total:     model.AvailableMetric(8000, "MiB", "/proc/meminfo", now),
-			Used:      model.AvailableMetric(4000, "MiB", "/proc/meminfo", now),
-			Available: model.AvailableMetric(4000, "MiB", "/proc/meminfo", now),
-			SwapTotal: model.AvailableMetric(0, "MiB", "/proc/meminfo", now),
-			SwapUsed:  model.AvailableMetric(0, "MiB", "/proc/meminfo", now),
-			CMATotal:  model.AvailableMetric(500, "MiB", "/proc/meminfo", now),
-			CMAUsed:   model.AvailableMetric(125, "MiB", "/proc/meminfo", now),
-			CMAFree:   model.AvailableMetric(375, "MiB", "/proc/meminfo", now),
+			Total:       model.AvailableMetric(8000, "MiB", "/proc/meminfo", now),
+			Used:        model.AvailableMetric(4000, "MiB", "/proc/meminfo", now),
+			Free:        model.AvailableMetric(1000, "MiB", "/proc/meminfo", now),
+			Shared:      model.AvailableMetric(64, "MiB", "/proc/meminfo", now),
+			Buffers:     model.AvailableMetric(250, "MiB", "/proc/meminfo", now),
+			Cache:       model.AvailableMetric(2125, "MiB", "/proc/meminfo", now),
+			BufferCache: model.AvailableMetric(2375, "MiB", "/proc/meminfo", now),
+			Available:   model.AvailableMetric(4000, "MiB", "/proc/meminfo", now),
+			SwapTotal:   model.AvailableMetric(2000, "MiB", "/proc/meminfo", now),
+			SwapUsed:    model.AvailableMetric(500, "MiB", "/proc/meminfo", now),
+			SwapFree:    model.AvailableMetric(1500, "MiB", "/proc/meminfo", now),
+			SwapCached:  model.AvailableMetric(32, "MiB", "/proc/meminfo", now),
+			CMATotal:    model.AvailableMetric(500, "MiB", "/proc/meminfo", now),
+			CMAUsed:     model.AvailableMetric(125, "MiB", "/proc/meminfo", now),
+			CMAFree:     model.AvailableMetric(375, "MiB", "/proc/meminfo", now),
 			Pressure: model.PressureInfo{
 				CPU: model.PressureResource{Some: model.PressureWindow{Avg10: model.AvailableMetric(0.25, "%", "/proc/pressure/cpu", now)}},
 				Memory: model.PressureResource{

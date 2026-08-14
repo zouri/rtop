@@ -18,6 +18,8 @@ var (
 	colorGood    = lipgloss.AdaptiveColor{Light: "#00875F", Dark: "#5FD787"}
 	colorWarn    = lipgloss.AdaptiveColor{Light: "#AF5F00", Dark: "#FFAF5F"}
 	colorBad     = lipgloss.AdaptiveColor{Light: "#AF0000", Dark: "#FF5F5F"}
+	colorBuffer  = lipgloss.AdaptiveColor{Light: "#005FAF", Dark: "#5FAFFF"}
+	colorCache   = lipgloss.AdaptiveColor{Light: "#875F00", Dark: "#FFD75F"}
 	colorPanel   = lipgloss.AdaptiveColor{Light: "#D7D7D7", Dark: "#444444"}
 
 	titleStyle = lipgloss.NewStyle().Bold(true).Foreground(colorPrimary)
@@ -370,7 +372,8 @@ func (m Model) memoryCardCompact(width int) string {
 	}
 	builder.WriteString("\n")
 	builder.WriteString(progressValue(percent, inner))
-	free := "Free " + formatMetric(m.latest.Memory.Available, 0)
+	free := "Free " + formatMetric(m.latest.Memory.Free, 0)
+	available := "Avail " + formatMetric(m.latest.Memory.Available, 0)
 	swap := "Swap " + formatMetric(m.latest.Memory.SwapUsed, 0)
 	if ansi.StringWidth(free)+ansi.StringWidth(swap)+2 <= inner {
 		builder.WriteString("\n" + free + "  " + swap)
@@ -378,6 +381,7 @@ func (m Model) memoryCardCompact(width int) string {
 		builder.WriteString("\n" + truncateText(free, inner))
 		builder.WriteString("\n" + truncateText(swap, inner))
 	}
+	builder.WriteString("\n" + truncateText(available+"  Buff/cache "+formatMetric(m.latest.Memory.BufferCache, 0), inner))
 	builder.WriteString(fmt.Sprintf("\nLoad %s %s %s", formatMetricCompact(m.latest.Load.OneMinute, 2), formatMetricCompact(m.latest.Load.FiveMinutes, 2), formatMetricCompact(m.latest.Load.FifteenMinutes, 2)))
 	if m.latest.Memory.Pressure.Memory.Some.Avg10.Status == model.Available {
 		builder.WriteString(fmt.Sprintf("\nPSI mem %s", formatMetricCompact(m.latest.Memory.Pressure.Memory.Some.Avg10, 2)))
@@ -527,8 +531,14 @@ func (m Model) memoryDetailCard(width int) string {
 		builder.WriteString("\nHistory    ")
 		builder.WriteString(sparkline(m.memoryHistory, max(4, inner-11)))
 	}
+	builder.WriteString(fmt.Sprintf("\nFree       %s", formatMetric(m.latest.Memory.Free, 0)))
+	builder.WriteString(fmt.Sprintf("\nShared     %s", formatMetric(m.latest.Memory.Shared, 0)))
+	builder.WriteString(fmt.Sprintf("\nBuffers    %s", formatMetric(m.latest.Memory.Buffers, 0)))
+	builder.WriteString(fmt.Sprintf("\nCache      %s", formatMetric(m.latest.Memory.Cache, 0)))
+	builder.WriteString(fmt.Sprintf("\nBuff/cache %s", formatMetric(m.latest.Memory.BufferCache, 0)))
 	builder.WriteString(fmt.Sprintf("\nAvailable  %s", formatMetric(m.latest.Memory.Available, 0)))
-	builder.WriteString(fmt.Sprintf("\nSwap       %s / %s", formatMetric(m.latest.Memory.SwapUsed, 0), formatMetric(m.latest.Memory.SwapTotal, 0)))
+	builder.WriteString(fmt.Sprintf("\nSwap       %s used / %s total", formatMetric(m.latest.Memory.SwapUsed, 0), formatMetric(m.latest.Memory.SwapTotal, 0)))
+	builder.WriteString(fmt.Sprintf("\n            %s free · %s cached", formatMetric(m.latest.Memory.SwapFree, 0), formatMetric(m.latest.Memory.SwapCached, 0)))
 	if m.latest.Memory.CMATotal.Status == model.Available {
 		builder.WriteString(fmt.Sprintf("\nCMA        %s used / %s total", formatMetric(m.latest.Memory.CMAUsed, 0), formatMetric(m.latest.Memory.CMATotal, 0)))
 	}

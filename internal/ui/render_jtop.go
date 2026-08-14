@@ -17,10 +17,13 @@ import (
 // formatting units, but are deliberately not used to compose the screen.
 
 var (
-	jtopLabelStyle  = lipgloss.NewStyle().Bold(true).Foreground(colorPrimary)
-	jtopHeaderStyle = lipgloss.NewStyle().Bold(true).Reverse(true).Foreground(colorGood)
-	jtopAxisStyle   = lipgloss.NewStyle().Foreground(colorMuted)
-	jtopChartStyle  = lipgloss.NewStyle().Foreground(colorPrimary)
+	jtopLabelStyle        = lipgloss.NewStyle().Bold(true).Foreground(colorPrimary)
+	jtopHeaderStyle       = lipgloss.NewStyle().Bold(true).Reverse(true).Foreground(colorGood)
+	jtopAxisStyle         = lipgloss.NewStyle().Foreground(colorMuted)
+	jtopChartStyle        = lipgloss.NewStyle().Foreground(colorPrimary)
+	jtopMemorySharedStyle = lipgloss.NewStyle().Foreground(colorGood)
+	jtopMemoryBufferStyle = lipgloss.NewStyle().Foreground(colorBuffer)
+	jtopMemoryCacheStyle  = lipgloss.NewStyle().Foreground(colorCache)
 )
 
 func fitLine(left, right string, width int) string {
@@ -93,6 +96,59 @@ func jtopGauge(name string, value float64, valueText, right string, width int) s
 	return ansi.Truncate(line, width, "")
 }
 
+type jtopGaugeSegment struct {
+	percent float64
+	style   lipgloss.Style
+}
+
+func jtopStackedGauge(name string, segments []jtopGaugeSegment, valueText, right string, width int) string {
+	width = max(1, width)
+	labelWidth := min(max(3, len(name)), 9)
+	label := fmt.Sprintf("%-*s", labelWidth, truncateText(name, labelWidth))
+	reserved := labelWidth + ansi.StringWidth(valueText) + ansi.StringWidth(right) + 6
+	barWidth := max(3, width-reserved)
+	if width < 28 {
+		barWidth = max(3, width-labelWidth-4)
+		valueText, right = "", ""
+	}
+
+	var bar strings.Builder
+	position := 0
+	cumulative := 0.0
+	for _, segment := range segments {
+		cumulative = min(100, cumulative+max(0, segment.percent))
+		end := int(cumulative / 100 * float64(barWidth))
+		if end > position {
+			bar.WriteString(segment.style.Render(strings.Repeat("|", end-position)))
+			position = end
+		}
+	}
+	bar.WriteString(mutedStyle.Render(strings.Repeat("·", max(0, barWidth-position))))
+
+	line := jtopLabelStyle.Render(label) + mutedStyle.Render("[") + bar.String() + mutedStyle.Render("]")
+	if valueText != "" {
+		line += " " + fmt.Sprintf("%6s", valueText)
+	}
+	if right != "" {
+		line += " " + right
+	}
+	return ansi.Truncate(line, width, "")
+}
+
+func jtopMemoryGauge(memory model.MemoryInfo, width int) string {
+	valueText := fmt.Sprintf("%s/%s", formatMetricCompact(memory.Used, 0), formatMetricCompact(memory.Total, 0))
+	breakdown, ok := memoryBreakdownPercentages(memory)
+	if !ok {
+		return jtopGauge("Mem", -1, valueText, "", width)
+	}
+	return jtopStackedGauge("Mem", []jtopGaugeSegment{
+		{percent: breakdown.used, style: jtopChartStyle},
+		{percent: breakdown.shared, style: jtopMemorySharedStyle},
+		{percent: breakdown.buffers, style: jtopMemoryBufferStyle},
+		{percent: breakdown.cache, style: jtopMemoryCacheStyle},
+	}, valueText, "", width)
+}
+
 func jtopMetricGauge(name string, metric model.Metric, right string, width int) string {
 	return jtopGauge(name, metricNumber(metric), formatMetricCompact(metric, 1), right, width)
 }
@@ -130,10 +186,11 @@ func (m Model) compactCPUs(width int) string {
 }
 
 func (m Model) compactMemory(width int) string {
-	percent := memoryPercent(m.latest.Memory)
 	lines := []string{
-		jtopGauge("Mem", percent,
-			fmt.Sprintf("%s/%s", formatMetricCompact(m.latest.Memory.Used, 0), formatMetricCompact(m.latest.Memory.Total, 0)), "", width),
+		jtopMemoryGauge(m.latest.Memory, width),
+		ansi.Truncate(fmt.Sprintf("Avail %s  Buff/cache %s",
+			formatMetricCompact(m.latest.Memory.Available, 0),
+			formatMetricCompact(m.latest.Memory.BufferCache, 0)), width, ""),
 		jtopGauge("Swp", ratioMetric(m.latest.Memory.SwapUsed, m.latest.Memory.SwapTotal),
 			fmt.Sprintf("%s/%s", formatMetricCompact(m.latest.Memory.SwapUsed, 0), formatMetricCompact(m.latest.Memory.SwapTotal, 0)), "", width),
 	}
@@ -296,6 +353,88 @@ func verticalChart(values []float64, width, height int) string {
 	return strings.Join(lines, "\n")
 }
 
+type memoryChartLayer uint8
+
+const (
+	memoryChartEmpty memoryChartLayer = iota
+	memoryChartUsed
+	memoryChartShared
+	memoryChartBuffers
+	memoryChartCache
+)
+
+func stackedMemoryChart(used, shared, buffers, cache []float64, width, height int) string {
+	width, height = max(2, width), max(1, height)
+	count := min(width, len(used), len(shared), len(buffers), len(cache))
+	missing := width - count
+	lines := make([]string, height)
+	for row := 0; row < height; row++ {
+		threshold := float64(height-row-1) * 100 / float64(height)
+		var builder strings.Builder
+		builder.WriteString(strings.Repeat(" ", missing))
+		for index := 0; index < count; index++ {
+			point := memoryBreakdown{
+				used:    used[len(used)-count+index],
+				shared:  shared[len(shared)-count+index],
+				buffers: buffers[len(buffers)-count+index],
+				cache:   cache[len(cache)-count+index],
+			}
+			builder.WriteString(renderMemoryChartLayer(memoryChartLayerAt(point, threshold)))
+		}
+		label := fmt.Sprintf(" %3.0f%%", threshold)
+		lines[row] = builder.String() + jtopAxisStyle.Render(label)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func memoryChartLayerAt(point memoryBreakdown, threshold float64) memoryChartLayer {
+	if point.used < 0 || point.shared < 0 || point.buffers < 0 || point.cache < 0 {
+		return memoryChartEmpty
+	}
+	cumulative := point.used
+	if cumulative > threshold {
+		return memoryChartUsed
+	}
+	cumulative += point.shared
+	if cumulative > threshold {
+		return memoryChartShared
+	}
+	cumulative += point.buffers
+	if cumulative > threshold {
+		return memoryChartBuffers
+	}
+	cumulative += point.cache
+	if cumulative > threshold {
+		return memoryChartCache
+	}
+	return memoryChartEmpty
+}
+
+func renderMemoryChartLayer(layer memoryChartLayer) string {
+	switch layer {
+	case memoryChartUsed:
+		return jtopChartStyle.Render("█")
+	case memoryChartShared:
+		return jtopMemorySharedStyle.Render("█")
+	case memoryChartBuffers:
+		return jtopMemoryBufferStyle.Render("█")
+	case memoryChartCache:
+		return jtopMemoryCacheStyle.Render("█")
+	default:
+		return " "
+	}
+}
+
+func memoryChartLegend(width int) string {
+	items := []string{
+		jtopChartStyle.Render("■") + " used",
+		jtopMemorySharedStyle.Render("■") + " shared",
+		jtopMemoryBufferStyle.Render("■") + " buffers",
+		jtopMemoryCacheStyle.Render("■") + " cache",
+	}
+	return strings.Join(wrapJtopItems(items, width), "\n")
+}
+
 func jtopFrequencyGauge(name string, frequency model.Metric, policy *model.FrequencyPolicy, width int) string {
 	if frequency.Status != model.Available || frequency.Value == nil {
 		return jtopUnavailableGauge(name, formatMetricCompact(frequency, 0), width)
@@ -444,43 +583,144 @@ func jtopTimeAxis(width int) string {
 
 func (m Model) renderJtopMemory(height int) string {
 	width := m.width
-	legendWidth := 0
-	if width >= 60 {
-		legendWidth = min(24, width/3)
-	}
-	chartWidth := width - legendWidth
-	used := fmt.Sprintf("RAM %s/%s", formatMetricCompact(m.latest.Memory.Used, 1), formatMetricCompact(m.latest.Memory.Total, 1))
-	chartHeight := max(4, height/2)
-	chart := titleStyle.Render(used) + "\n" + verticalChart(m.memoryHistory, max(2, chartWidth-6), max(2, chartHeight-2)) +
-		"\n" + jtopTimeAxis(chartWidth)
-	if legendWidth > 0 {
-		legend := strings.Join([]string{
-			titleStyle.Render("RAM"),
-			fitLine("Used:", formatMetricCompact(m.latest.Memory.Used, 0), legendWidth),
-			fitLine("Available:", formatMetricCompact(m.latest.Memory.Available, 0), legendWidth),
-			fitLine("CMA:", formatMetricCompact(m.latest.Memory.CMAUsed, 0), legendWidth),
-			fitLine("Swap:", formatMetricCompact(m.latest.Memory.SwapUsed, 0), legendWidth),
-			fitLine("Total:", formatMetricCompact(m.latest.Memory.Total, 0), legendWidth),
-		}, "\n")
-		chart = joinJtopColumns(chart, legend, chartWidth, legendWidth, false)
-	}
-	sections := []string{chart}
+	summary := jtopMemorySummary(m.latest.Memory, width)
+	activity := m.jtopMemoryActivity(width)
+	fixedHeight := lipgloss.Height(summary) + lipgloss.Height(activity)
+
+	ddr := ""
 	for _, accelerator := range m.latest.Accelerators {
 		if accelerator.Type == "ddr" {
-			sections = append(sections, jtopMetricGauge("DDR", accelerator.Usage,
-				formatMetricCompact(accelerator.Frequency, 0), width))
+			ddr = jtopMetricGauge("DDR", accelerator.Usage,
+				formatMetricCompact(accelerator.Frequency, 0), width)
+			fixedHeight++
 			break
 		}
 	}
-	remaining := max(4, height-lipgloss.Height(strings.Join(sections, "\n")))
-	sections = append(sections, m.jtopSwapArea(width, remaining))
+
+	chartHeight := max(4, height-fixedHeight)
+	chartHeading := fitLine(
+		titleStyle.Render("RAM HISTORY"),
+		fmt.Sprintf("Used: %s / %s", formatMetricCompact(m.latest.Memory.Used, 1), formatMetricCompact(m.latest.Memory.Total, 1)),
+		width,
+	)
+	chartHeading += "\n" + memoryChartLegend(width)
+	plotHeight := max(1, chartHeight-lipgloss.Height(chartHeading)-1)
+	chart := chartHeading + "\n" + stackedMemoryChart(
+		m.memoryUsedHistory,
+		m.memorySharedHistory,
+		m.memoryBufferHistory,
+		m.memoryCacheHistory,
+		max(2, width-6),
+		plotHeight,
+	) +
+		"\n" + jtopTimeAxis(width)
+
+	sections := []string{summary, chart}
+	if ddr != "" {
+		sections = append(sections, ddr)
+	}
+	sections = append(sections, activity)
 	return fitLines(strings.Join(sections, "\n"), width)
 }
 
-func (m Model) jtopSwapArea(width, height int) string {
+func jtopMemorySummary(memory model.MemoryInfo, width int) string {
+	width = max(1, width)
+	if width >= 72 {
+		const labelWidth = 6
+		columnWidth := (width - labelWidth) / 6
+		headings := []string{"total", "used", "free", "shared", "buff/cache", "available"}
+		header := jtopLabelStyle.Render(fmt.Sprintf("%-*s", labelWidth, "RAM"))
+		for _, heading := range headings {
+			header += mutedStyle.Render(fmt.Sprintf("%*s", columnWidth, heading))
+		}
+		row := func(label string, metrics ...model.Metric) string {
+			line := jtopLabelStyle.Render(fmt.Sprintf("%-*s", labelWidth, label))
+			for index := range headings {
+				value := ""
+				if index < len(metrics) {
+					value = truncateText(formatMetricCompact(metrics[index], 0), columnWidth)
+				}
+				line += fmt.Sprintf("%*s", columnWidth, value)
+			}
+			return ansi.Truncate(line, width, "")
+		}
+		lines := []string{
+			ansi.Truncate(header, width, ""),
+			row("Mem:", memory.Total, memory.Used, memory.Free, memory.Shared, memory.BufferCache, memory.Available),
+			row("SWAP:", memory.SwapTotal, memory.SwapUsed, memory.SwapFree),
+		}
+		lines = append(lines, wrapJtopItems(memoryDetailItems(memory, true), width)...)
+		return strings.Join(lines, "\n")
+	}
+
+	lines := []string{titleStyle.Render("RAM")}
+	lines = append(lines, wrapJtopItems([]string{
+		jtopMemoryMetric("Total", memory.Total),
+		jtopMemoryMetric("Used", memory.Used),
+		jtopMemoryMetric("Free", memory.Free),
+		jtopMemoryMetric("Shared", memory.Shared),
+		jtopMemoryMetric("Buff/cache", memory.BufferCache),
+		jtopMemoryMetric("Available", memory.Available),
+	}, width)...)
+	lines = append(lines, wrapJtopItems(memoryDetailItems(memory, false), width)...)
+	lines = append(lines, titleStyle.Render("SWAP"))
+	lines = append(lines, wrapJtopItems([]string{
+		jtopMemoryMetric("Total", memory.SwapTotal),
+		jtopMemoryMetric("Used", memory.SwapUsed),
+		jtopMemoryMetric("Free", memory.SwapFree),
+		jtopMemoryMetric("Cached", memory.SwapCached),
+	}, width)...)
+	return strings.Join(lines, "\n")
+}
+
+func memoryDetailItems(memory model.MemoryInfo, includeSwapCache bool) []string {
+	items := []string{
+		jtopMemoryMetric("Buffers", memory.Buffers),
+		jtopMemoryMetric("Cache", memory.Cache),
+	}
+	if includeSwapCache {
+		items = append(items, jtopMemoryMetric("Swap cache", memory.SwapCached))
+	}
+	if memory.CMATotal.Status == model.Available {
+		items = append(items, jtopLabelStyle.Render("CMA:")+" "+
+			fmt.Sprintf("%s/%s", formatMetricCompact(memory.CMAUsed, 0), formatMetricCompact(memory.CMATotal, 0)))
+	}
+	return items
+}
+
+func jtopMemoryMetric(label string, metric model.Metric) string {
+	return jtopLabelStyle.Render(label+":") + " " + formatMetricCompact(metric, 0)
+}
+
+func wrapJtopItems(items []string, width int) []string {
+	width = max(1, width)
+	lines := make([]string, 0, len(items))
+	line := ""
+	for _, item := range items {
+		item = ansi.Truncate(item, width, "")
+		if line == "" {
+			line = item
+			continue
+		}
+		if ansi.StringWidth(line)+2+ansi.StringWidth(item) <= width {
+			line += "  " + item
+			continue
+		}
+		lines = append(lines, line)
+		line = item
+	}
+	if line != "" {
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+func (m Model) jtopMemoryActivity(width int) string {
 	inner := max(2, width)
-	heading := fmt.Sprintf("SWAP %s/%s", formatMetricCompact(m.latest.Memory.SwapUsed, 0), formatMetricCompact(m.latest.Memory.SwapTotal, 0))
-	lines := []string{titleStyle.Render(heading)}
+	lines := make([]string, 0, len(m.latest.Memory.ZRAM)+2)
+	if len(m.latest.Memory.ZRAM) > 0 {
+		lines = append(lines, titleStyle.Render("ZRAM"))
+	}
 	for _, device := range m.latest.Memory.ZRAM {
 		line := jtopGauge(device.Name, ratioMetric(device.MemoryUsed, device.DiskSize),
 			fmt.Sprintf("%s/%s", formatMetricCompact(device.MemoryUsed, 0), formatMetricCompact(device.DiskSize, 0)), "", inner)
@@ -493,10 +733,7 @@ func (m Model) jtopSwapArea(width, height int) string {
 			formatMetricCompact(m.latest.Memory.Pressure.Memory.Full.Avg10, 2),
 			formatMetricCompact(m.latest.Memory.Pressure.IO.Some.Avg10, 2),
 			formatMetricCompact(m.latest.Memory.Pressure.IO.Full.Avg10, 2)))
-	for len(lines) < height {
-		lines = append(lines, "")
-	}
-	return strings.Join(lines[:min(len(lines), height)], "\n")
+	return strings.Join(lines, "\n")
 }
 
 func (m Model) renderJtopEngines(_ int) string {
