@@ -2,134 +2,131 @@
 
 简体中文 | [English](README_EN.md)
 
-rtop 是面向 Rockchip Linux 平台的只读终端系统监视器。当前版本提供
-Linux 通用指标采集、进程排行、交互式终端界面、通过 devfreq 动态发现的
-RK3588 GPU/NPU/DDR 指标，以及 RGA scheduler 负载。当内核提供相应接口时，还可显示 CPU/devfreq
-频率策略、上下限与调速器、运行时电源状态、温控点与冷却状态、PSI 压力、
-CMA、zram、hwmon 电源轨和风扇状态。
-
-当 RKNPU debugfs 节点可读时，rtop 会显示各个 NPU 核心的负载；无法读取时，
-对应核心会明确显示 `permission_denied`，不会将缺失数据误报为 0。
-
-当 Rockchip 统一 RGA 驱动暴露 `/sys/kernel/debug/rkrga/load` 或
-`/proc/rkrga/load` 时，rtop 会显示各 scheduler（例如 RGA2、RGA3 core）的
-负载、它们的算术平均负载、驱动报告的 session 状态、TGID 和进程命令，并读取同目录的驱动
-版本。session 表的异常行会被跳过并报告警告，不会影响 scheduler 负载。该接口不提供
-逐进程利用率，不能把 scheduler 百分比分摊给各进程。旧 RGA/RGA2 驱动通常没有负载
-统计接口，此时会明确显示 `unsupported`，不会根据队列长度估算利用率。
-
-## 截图
-
-以下截图由 rtop 的实际 TUI 使用 RK3588 示例数据渲染。点击图片可查看原图。
-
-### 系统总览
+`rtop` 是面向 Rockchip Linux 的只读终端系统监视器。它在一个 TUI 中集中展示
+CPU、内存、温度、进程以及 GPU、NPU、DDR、RGA 状态，也可输出适合脚本处理的
+JSON 快照。
 
 [![rtop 系统总览](docs/images/rtop-overview.png)](docs/images/rtop-overview.png)
 
-### 内存与压力
+## 主要功能
 
-[![rtop 内存与压力监控](docs/images/rtop-memory.png)](docs/images/rtop-memory.png)
+- **只读监控**：读取 `/proc`、sysfs 和 debugfs，不修改调频策略、权限或系统状态。
+- **Rockchip 指标**：动态发现 GPU、NPU、DDR devfreq 设备，并采集 RKNPU 逐核负载和
+  RGA scheduler 负载。
+- **Linux 通用指标**：CPU、内存、Swap、PSI、CMA、zram、温控、冷却设备、hwmon
+  电源与风扇，以及进程排行。
+- **明确的数据状态**：节点缺失或无权读取时显示 `unsupported`、
+  `permission_denied` 或 `unavailable`，不会误报为 0。
+- **多种输出方式**：交互式 TUI、文本/JSON 快照、持续 NDJSON 输出和只读诊断报告。
 
-### Rockchip 计算引擎
+## 界面预览
 
-[![rtop Rockchip GPU、NPU、DDR 和 RGA 监控](docs/images/rtop-engines.png)](docs/images/rtop-engines.png)
+| 内存与压力 | Rockchip 计算引擎 |
+|:---:|:---:|
+| [![rtop 内存与压力监控](docs/images/rtop-memory.png)](docs/images/rtop-memory.png) | [![rtop Rockchip GPU、NPU、DDR 和 RGA 监控](docs/images/rtop-engines.png)](docs/images/rtop-engines.png) |
 
-## 构建
-
-```sh
-go build -buildvcs=false ./cmd/rtop
-```
+点击图片可查看原图。截图由实际 TUI 使用 RK3588 示例数据渲染。
 
 ## 安装
 
-从 GitHub 安装最新的 Linux ARM64 版本：
+当前预编译版本支持 Linux ARM64。完整的平台和内核支持情况见
+[支持矩阵](docs/support-matrix.md)。
+
+### GitHub
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/zouri/rtop/main/scripts/install.sh | sudo sh
+rtop
 ```
 
-国内网络也可以从 Gitee 安装。脚本、最新版本信息、安装包和校验文件都会从
-Gitee 获取：
+### Gitee
+
+GitHub 访问受限时，可让脚本、版本信息、安装包和校验文件全部从 Gitee 获取：
 
 ```sh
 curl -fsSL https://gitee.com/zouri/rtop/raw/main/scripts/install.sh | sudo env RTOP_SOURCE=gitee sh
+rtop
 ```
 
-安装脚本会校验发布包的 SHA-256，并要求使用 root 权限将程序安装到全局路径
-`/usr/bin/rtop`。这样普通用户和 `sudo` 环境都能直接找到该命令。可以通过
-`RTOP_VERSION=v0.2.0` 安装指定版本；该选项同时适用于 GitHub 和 Gitee：
+安装脚本会校验发布包的 SHA-256，并将程序安装到 `/usr/bin/rtop`。普通指标通常
+不需要 root 权限；RKNPU 逐核负载和部分 RGA 数据是否可见取决于 debugfs 权限。
+
+### 从源码构建
+
+需要 Go 1.24 或更高版本：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/zouri/rtop/main/scripts/install.sh | sudo env RTOP_VERSION=v0.2.0 sh
+git clone https://github.com/zouri/rtop.git
+cd rtop
+make build
+./bin/rtop
 ```
 
 ## 使用
 
-```text
-rtop
-rtop info
-rtop info --json
-rtop snapshot --json
-rtop snapshot --watch --interval 1s
-rtop snapshot --watch --top 20
-rtop snapshot --watch --no-processes
-rtop --interval 1s --process-interval 2s --thermal-interval 5s
-rtop doctor
-rtop doctor --json
-```
+### 常用命令
 
-交互界面采用类似 jtop 的开发板监控布局。界面可响应终端尺寸变化，最小支持
-24 列、8 行；窗口更小时会显示简洁的尺寸提示，而不会绘制被截断的面板。
+| 命令 | 用途 |
+|---|---|
+| `rtop` | 启动交互式 TUI |
+| `rtop info` | 显示开发板、SoC、内核和系统信息 |
+| `rtop info --json` | 以 JSON 输出系统信息 |
+| `rtop snapshot` | 输出一次文本快照 |
+| `rtop snapshot --json` | 输出一次 JSON 快照 |
+| `rtop snapshot --watch --interval 1s` | 持续输出每行一个对象的 NDJSON |
+| `rtop snapshot --watch --top 20` | 仅保留 CPU 占用最高的 20 个进程 |
+| `rtop snapshot --watch --no-processes` | 跳过进程采集 |
+| `rtop doctor` | 检查平台、驱动、权限和指标来源 |
 
-- `1`：ALL，开发板总览。
-- `2`：CPU 总负载、逐核历史图、频率范围与调速器。
-- `3`：与 `free` 对齐的 `total / used / free / shared / buff/cache / available` 与 Swap 明细，
-  以及 buffers、cache、swap cache、CMA、PSI、zram、DDR 状态；内存历史图按 jtop
-  的配色区分 used、shared、buffers 和 cache。
-- `4`：Rockchip 计算引擎的负载、频率、devfreq 策略、运行状态和逐核状态。
-- `5`：进程列表。
-- `6` 或 `i`：开发板、驱动和指标来源信息。
-- `←`/`→` 或 `Tab`：按 jtop 的方式循环切换页面。
-- `?`：在当前页面上显示帮助。
-- `↑`/`↓` 或 `j`/`k`：选择进程或滚动详情页面。
-- `c`/`m`：按 CPU 或内存占用排序进程。
-- `p`：在 ALL 和 PROCESSES 页显示或隐藏可执行文件路径。
-- `Enter`：展开或收起当前进程的详细信息。
-- `r`：立即刷新。
-- `q` 或 `Ctrl+C`：退出。
+> **注意：** `--top N` 仅作用于 `snapshot --json` 和
+> `snapshot --watch` 的 JSON 输出。`--no-processes` 会完全跳过进程采集。
 
-每项指标都会报告状态和数据来源。缺失或无法读取的节点不会显示为 0。可以使用
-`--root testdata/generic-linux` 读取测试数据树，而不是访问当前系统。
+使用 `rtop --help` 或 `rtop <command> --help` 查看全部参数。
 
-CPU、内存、加速器、电源和风扇指标按照 `--interval` 设置的周期采集。进程和温度
-默认分别以 2 秒和 5 秒的较低频率采集，以减少监控开销；可通过
-`--process-interval` 和 `--thermal-interval` 调整。按下 `r` 会立即刷新当前页面
-所需的采集器。
+### TUI 快捷键
 
-TUI 会根据当前页面选择采集范围：ALL 收集整机视图；CPU 仅采集 CPU 指标；
-Memory 采集内存及 DDR 指标；Engines 采集加速器指标；
-Processes 仅扫描进程；Info 读取轻量级能力信息。帮助页面以覆盖层显示，不会改变
-当前采集范围。切换页面后，未被当前页面采集的指标会保留最近一次数据，而不会被
-显示为缺失。
+| 按键 | 操作 |
+|---|---|
+| `1`–`6` | 打开 ALL、CPU、MEMORY、ENGINES、PROCESSES、INFO 页面 |
+| `←` / `→` / `Tab` | 切换页面 |
+| `↑` / `↓` / `j` / `k` | 选择进程或滚动详情 |
+| `c` / `m` | 按 CPU 或内存占用排序 |
+| `p` | 显示或隐藏可执行文件路径 |
+| `Enter` | 展开或收起进程详情 |
+| `r` | 立即刷新 |
+| `?` | 显示帮助 |
+| `q` / `Ctrl+C` | 退出 |
 
-在无界面模式下，`snapshot --top N` 仅输出最繁忙的 N 个进程，
-`snapshot --no-processes` 会完全跳过进程采集。
+## 诊断与兼容性
 
-## 诊断
-
-`rtop doctor` 会检查平台识别、devfreq 驱动、debugfs 挂载与访问权限、DVFS
-控制节点、内存压力能力、温控能力、hwmon 电源/风扇能力，以及每项指标实际选择的
-数据来源。该命令严格只读，不会挂载文件系统或修改权限。
-
-诊断报告的解释请参阅 [docs/diagnostics.md](docs/diagnostics.md)。CPUFreq policy、
-RK3588 三个共享调频域以及 `Frq` 状态含义请参阅
-[docs/cpufreq.md](docs/cpufreq.md)。
-
-## 打包
+先运行以下命令检查平台识别、devfreq 驱动、debugfs 权限和实际指标来源：
 
 ```sh
-make package VERSION=v0.1.0
+rtop doctor
+rtop doctor --json > rtop-doctor.json
 ```
 
-构建产物位于 `dist/`，包括 ARM64 tar 包、Debian 软件包和 `SHA256SUMS`。
-当前平台支持情况请参阅 [docs/support-matrix.md](docs/support-matrix.md)。
+分享 JSON 报告前请先检查内容；其中包含主机名、开发板型号、内核版本、设备名和
+文件系统路径。详细说明见：
+
+- [诊断指南](docs/diagnostics.md)
+- [平台支持矩阵](docs/support-matrix.md)
+- [CPUFreq policy 与 RK3588 CPU 频率](docs/cpufreq.md)
+
+## 反馈与贡献
+
+项目由 [zouri](https://github.com/zouri) 和贡献者维护。问题或兼容性报告请提交到
+[GitHub Issues](https://github.com/zouri/rtop/issues)，并附上 rtop 版本、开发板/
+SoC、内核/BSP 信息以及检查后的 `rtop doctor --json` 输出。
+
+提交 Pull Request 前请运行：
+
+```sh
+make test
+make lint
+make build
+```
+
+## 许可证
+
+[MIT License](LICENSE)
