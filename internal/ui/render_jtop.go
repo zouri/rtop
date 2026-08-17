@@ -26,6 +26,11 @@ var (
 	jtopMemoryCacheStyle  = lipgloss.NewStyle().Foreground(colorCache)
 )
 
+const (
+	jtopGaugeValueWidth = 6
+	jtopGaugeRightWidth = 8
+)
+
 func fitLine(left, right string, width int) string {
 	if width <= 0 {
 		return ""
@@ -71,7 +76,9 @@ func jtopGauge(name string, value float64, valueText, right string, width int) s
 	width = max(1, width)
 	labelWidth := min(max(3, len(name)), 9)
 	label := fmt.Sprintf("%-*s", labelWidth, truncateText(name, labelWidth))
-	reserved := labelWidth + ansi.StringWidth(valueText) + ansi.StringWidth(right) + 6
+	valueWidth := gaugeFieldWidth(valueText, jtopGaugeValueWidth)
+	rightWidth := gaugeFieldWidth(right, jtopGaugeRightWidth)
+	reserved := labelWidth + valueWidth + rightWidth + 6
 	barWidth := max(3, width-reserved)
 	if width < 28 {
 		barWidth = max(3, width-labelWidth-4)
@@ -88,12 +95,23 @@ func jtopGauge(name string, value float64, valueText, right string, width int) s
 	}
 	line := jtopLabelStyle.Render(label) + mutedStyle.Render("[") + bar + mutedStyle.Render("]")
 	if valueText != "" {
-		line += " " + fmt.Sprintf("%6s", valueText)
+		line += " " + padGaugeField(valueText, valueWidth)
 	}
 	if right != "" {
-		line += " " + right
+		line += " " + padGaugeField(right, rightWidth)
 	}
 	return ansi.Truncate(line, width, "")
+}
+
+func gaugeFieldWidth(value string, minimum int) int {
+	if value == "" {
+		return 0
+	}
+	return max(minimum, ansi.StringWidth(value))
+}
+
+func padGaugeField(value string, width int) string {
+	return strings.Repeat(" ", max(0, width-ansi.StringWidth(value))) + value
 }
 
 type jtopGaugeSegment struct {
@@ -105,7 +123,9 @@ func jtopStackedGauge(name string, segments []jtopGaugeSegment, valueText, right
 	width = max(1, width)
 	labelWidth := min(max(3, len(name)), 9)
 	label := fmt.Sprintf("%-*s", labelWidth, truncateText(name, labelWidth))
-	reserved := labelWidth + ansi.StringWidth(valueText) + ansi.StringWidth(right) + 6
+	valueWidth := gaugeFieldWidth(valueText, jtopGaugeValueWidth)
+	rightWidth := gaugeFieldWidth(right, jtopGaugeRightWidth)
+	reserved := labelWidth + valueWidth + rightWidth + 6
 	barWidth := max(3, width-reserved)
 	if width < 28 {
 		barWidth = max(3, width-labelWidth-4)
@@ -127,16 +147,16 @@ func jtopStackedGauge(name string, segments []jtopGaugeSegment, valueText, right
 
 	line := jtopLabelStyle.Render(label) + mutedStyle.Render("[") + bar.String() + mutedStyle.Render("]")
 	if valueText != "" {
-		line += " " + fmt.Sprintf("%6s", valueText)
+		line += " " + padGaugeField(valueText, valueWidth)
 	}
 	if right != "" {
-		line += " " + right
+		line += " " + padGaugeField(right, rightWidth)
 	}
 	return ansi.Truncate(line, width, "")
 }
 
 func jtopMemoryGauge(memory model.MemoryInfo, width int) string {
-	valueText := fmt.Sprintf("%s/%s", formatMetricCompact(memory.Used, 0), formatMetricCompact(memory.Total, 0))
+	valueText := formatMetricPairCompact(memory.Used, memory.Total, 0)
 	breakdown, ok := memoryBreakdownPercentages(memory)
 	if !ok {
 		return jtopGauge("Mem", -1, valueText, "", width)
@@ -151,6 +171,13 @@ func jtopMemoryGauge(memory model.MemoryInfo, width int) string {
 
 func jtopMetricGauge(name string, metric model.Metric, right string, width int) string {
 	return jtopGauge(name, metricNumber(metric), formatMetricCompact(metric, 1), right, width)
+}
+
+func formatMetricPairCompact(value, total model.Metric, precision int) string {
+	valueText := formatMetricCompact(value, precision)
+	totalText := formatMetricCompact(total, precision)
+	fieldWidth := max(ansi.StringWidth(valueText), ansi.StringWidth(totalText))
+	return padGaugeField(valueText, fieldWidth) + "/" + totalText
 }
 
 func (m Model) compactCPUs(width int) string {
@@ -188,29 +215,23 @@ func (m Model) compactCPUs(width int) string {
 func (m Model) compactMemory(width int) string {
 	lines := []string{
 		jtopMemoryGauge(m.latest.Memory, width),
-		ansi.Truncate(fmt.Sprintf("Avail %s  Buff/cache %s",
-			formatMetricCompact(m.latest.Memory.Available, 0),
-			formatMetricCompact(m.latest.Memory.BufferCache, 0)), width, ""),
 		jtopGauge("Swp", ratioMetric(m.latest.Memory.SwapUsed, m.latest.Memory.SwapTotal),
-			fmt.Sprintf("%s/%s", formatMetricCompact(m.latest.Memory.SwapUsed, 0), formatMetricCompact(m.latest.Memory.SwapTotal, 0)), "", width),
+			formatMetricPairCompact(m.latest.Memory.SwapUsed, m.latest.Memory.SwapTotal, 0), "", width),
 	}
 	if m.latest.Memory.CMATotal.Status == model.Available {
 		lines = append(lines, jtopGauge("CMA", ratioMetric(m.latest.Memory.CMAUsed, m.latest.Memory.CMATotal),
-			fmt.Sprintf("%s/%s", formatMetricCompact(m.latest.Memory.CMAUsed, 0), formatMetricCompact(m.latest.Memory.CMATotal, 0)), "", width))
+			formatMetricPairCompact(m.latest.Memory.CMAUsed, m.latest.Memory.CMATotal, 0), "", width))
 	}
 	return strings.Join(lines, "\n")
 }
 
 func (m Model) compactStatus(width int) string {
-	lines := make([]string, 0, 4)
+	lines := make([]string, 0, 3)
 	for _, fan := range m.latest.Fans[:min(2, len(m.latest.Fans))] {
 		lines = append(lines, jtopMetricGauge("FAN", fan.PWM, formatMetricCompact(fan.Speed, 0), width))
 	}
 	if len(lines) == 0 {
 		lines = append(lines, jtopGauge("FAN", -1, "", "", width))
-	}
-	if zone, ok := hottestThermal(m.latest.Thermals); ok {
-		lines = append(lines, fitLine(jtopLabelStyle.Render("Temp"), formatTemperature(zone.Temperature), width))
 	}
 	load := fmt.Sprintf("%s %s %s", formatMetricCompact(m.latest.Load.OneMinute, 2),
 		formatMetricCompact(m.latest.Load.FiveMinutes, 2), formatMetricCompact(m.latest.Load.FifteenMinutes, 2))
@@ -225,18 +246,6 @@ func ratioMetric(used, total model.Metric) float64 {
 		return -1
 	}
 	return usedValue * 100 / totalValue
-}
-
-func (m Model) compactAccelerators(width int) string {
-	lines := make([]string, 0, len(m.latest.Accelerators))
-	for _, accelerator := range m.latest.Accelerators {
-		right := formatMetricCompact(accelerator.Frequency, 0)
-		if accelerator.Type == "rga" && accelerator.Frequency.Status == model.Unsupported {
-			right = ""
-		}
-		lines = append(lines, jtopMetricGauge(engineShortName(accelerator), accelerator.Usage, right, width))
-	}
-	return strings.Join(lines, "\n")
 }
 
 func engineShortName(accelerator model.Accelerator) string {
@@ -256,9 +265,6 @@ func (m Model) renderJtopAll(height int) string {
 	sections = append(sections, joinJtopColumns(
 		m.compactMemory(leftWidth), m.compactStatus(rightWidth), leftWidth, rightWidth, false,
 	))
-	if engines := m.compactAccelerators(width); engines != "" {
-		sections = append(sections, engines)
-	}
 
 	used := 0
 	for _, section := range sections {
@@ -283,11 +289,8 @@ func (m Model) jtopSummaryPanes(height, width int) string {
 	widths := []int{columnWidth, columnWidth, width - 2*columnWidth}
 	engineLines := make([]string, 0, len(m.latest.Accelerators))
 	for _, engine := range m.latest.Accelerators {
-		state := goodStyle.Render("ON")
-		if metricNumber(engine.Usage) < 0 {
-			state = badStyle.Render("OFF")
-		}
-		engineLines = append(engineLines, fitLine(engineShortName(engine), state, max(1, widths[0]-2)))
+		value := summaryMetricValue(engine.Usage) + " " + summaryMetricValue(engine.Frequency)
+		engineLines = append(engineLines, fitLine(engineShortName(engine), value, max(1, widths[0]-2)))
 	}
 	temperatureLines := make([]string, 0, len(m.latest.Thermals))
 	for _, zone := range m.latest.Thermals {
@@ -308,6 +311,13 @@ func (m Model) jtopSummaryPanes(height, width int) string {
 	right := jtopBox("Power", powerLines, widths[2], height)
 	return joinJtopColumns(joinJtopColumns(left, middle, widths[0], widths[1], false), right,
 		widths[0]+widths[1], widths[2], false)
+}
+
+func summaryMetricValue(metric model.Metric) string {
+	if metric.Status != model.Available || metric.Value == nil {
+		return "-"
+	}
+	return formatMetricCompact(metric, 0)
 }
 
 func jtopBox(title string, content []string, width, height int) string {
@@ -723,7 +733,7 @@ func (m Model) jtopMemoryActivity(width int) string {
 	}
 	for _, device := range m.latest.Memory.ZRAM {
 		line := jtopGauge(device.Name, ratioMetric(device.MemoryUsed, device.DiskSize),
-			fmt.Sprintf("%s/%s", formatMetricCompact(device.MemoryUsed, 0), formatMetricCompact(device.DiskSize, 0)), "", inner)
+			formatMetricPairCompact(device.MemoryUsed, device.DiskSize, 0), "", inner)
 		lines = append(lines, line)
 	}
 	lines = append(lines,

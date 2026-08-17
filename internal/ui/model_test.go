@@ -514,16 +514,71 @@ func TestProcessSelectionRemainsVisibleAfterResize(t *testing.T) {
 }
 
 func TestStandardTerminalOverviewIncludesEngines(t *testing.T) {
+	snapshot := testSnapshot()
+	snapshot.Accelerators = append(snapshot.Accelerators, model.Accelerator{Name: "DDR/DMC", Type: "ddr"})
+
+	uiModel := NewModel(make(chan model.Snapshot), nil)
+	updated, _ := uiModel.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	uiModel = updated.(Model)
+	updated, _ = uiModel.Update(snapshotMsg{snapshot: snapshot})
+	uiModel = updated.(Model)
+	view := ansi.Strip(uiModel.View())
+	for _, expected := range []string{"Mem", "GPU", "NPU", "DDR", "RGA", "PID", "[CPU%]", "HW engines", "Sensor", "Power"} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("overview is missing %q:\n%s", expected, view)
+		}
+	}
+	for _, engine := range []string{"GPU", "NPU", "DDR", "RGA"} {
+		if count := strings.Count(view, engine); count != 1 {
+			t.Fatalf("overview shows %s %d times, want it only in HW engines:\n%s", engine, count, view)
+		}
+	}
+}
+
+func TestOverviewOmitsAvailabilityCacheAndTemperatureRow(t *testing.T) {
 	uiModel := NewModel(make(chan model.Snapshot), nil)
 	updated, _ := uiModel.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	uiModel = updated.(Model)
 	updated, _ = uiModel.Update(snapshotMsg{snapshot: testSnapshot()})
 	uiModel = updated.(Model)
-	view := ansi.Strip(uiModel.View())
-	for _, expected := range []string{"Mem", "GPU", "NPU", "RGA", "PID", "[CPU%]", "HW engines", "Sensor", "Power"} {
-		if !strings.Contains(view, expected) {
-			t.Fatalf("overview is missing %q:\n%s", expected, view)
+
+	view := ansi.Strip(uiModel.renderJtopAll(22))
+	for _, unwanted := range []string{"Avail ", "Buff/cache", "Temp"} {
+		if strings.Contains(view, unwanted) {
+			t.Fatalf("overview still contains %q:\n%s", unwanted, view)
 		}
+	}
+	for _, retained := range []string{"Mem", "Swp", "FAN", "Load", "Updated"} {
+		if !strings.Contains(view, retained) {
+			t.Fatalf("overview lost %q while removing the availability row:\n%s", retained, view)
+		}
+	}
+}
+
+func TestOverviewHWEnginesShowsUsageFrequencyAndDashForMissingData(t *testing.T) {
+	now := time.Now()
+	snapshot := testSnapshot()
+	snapshot.Accelerators = []model.Accelerator{
+		{Name: "Mali GPU", Type: "gpu", Usage: model.AvailableMetric(20, "%", "/sys/gpu/load", now), Frequency: model.AvailableMetric(1000, "MHz", "/sys/gpu/frequency", now)},
+		{Name: "RKNPU", Type: "npu", Usage: model.AvailableMetric(40, "%", "/sys/npu/load", now), Frequency: model.AvailableMetric(900, "MHz", "/sys/npu/frequency", now)},
+		{Name: "DDR/DMC", Type: "ddr", Usage: model.MissingMetric(model.Unavailable, "%", "/sys/ddr/load", "not exposed", now), Frequency: model.AvailableMetric(800, "MHz", "/sys/ddr/frequency", now)},
+		{Name: "Rockchip RGA", Type: "rga", Usage: model.AvailableMetric(30, "%", "/sys/rga/load", now), Frequency: model.MissingMetric(model.Unsupported, "MHz", "/sys/rga/frequency", "not exposed", now)},
+	}
+
+	uiModel := NewModel(make(chan model.Snapshot), nil)
+	updated, _ := uiModel.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	uiModel = updated.(Model)
+	updated, _ = uiModel.Update(snapshotMsg{snapshot: snapshot})
+	uiModel = updated.(Model)
+
+	view := ansi.Strip(uiModel.jtopSummaryPanes(6, 80))
+	for _, expected := range []string{"GPU          20% 1000MHz", "NPU           40% 900MHz", "DDR             - 800MHz", "RGA                30% -"} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("HW engines summary is missing %q:\n%s", expected, view)
+		}
+	}
+	if strings.Contains(view, "ON") || strings.Contains(view, "OFF") {
+		t.Fatalf("HW engines summary still contains an ON/OFF state:\n%s", view)
 	}
 }
 
@@ -689,6 +744,61 @@ func TestJtopCPUGridRendersEightCoresInStandardTerminal(t *testing.T) {
 		t.Fatalf("CPU grid frequency gauges=%d, want 8:\n%s", count, view)
 	}
 	assertViewFitsTerminal(t, uiModel)
+}
+
+func TestJtopGaugeBarWidthStaysFixedWhenValuesGainDigits(t *testing.T) {
+	now := time.Now()
+	wantWidth := -1
+	for _, sample := range []struct {
+		usage     float64
+		frequency float64
+	}{
+		{usage: 9.9, frequency: 999},
+		{usage: 10, frequency: 1000},
+		{usage: 100, frequency: 1200},
+	} {
+		gauge := jtopMetricGauge(
+			"GPU",
+			model.AvailableMetric(sample.usage, "%", "load", now),
+			formatMetricCompact(model.AvailableMetric(sample.frequency, "MHz", "frequency", now), 0),
+			40,
+		)
+		barWidth := renderedGaugeBarWidth(t, gauge)
+		if wantWidth < 0 {
+			wantWidth = barWidth
+		} else if barWidth != wantWidth {
+			t.Fatalf("gauge bar width changed from %d to %d for %.1f%% at %.0fMHz: %q",
+				wantWidth, barWidth, sample.usage, sample.frequency, ansi.Strip(gauge))
+		}
+	}
+
+	memory := testSnapshot().Memory
+	wantWidth = -1
+	for _, used := range []float64{999, 1000} {
+		memory.Used = model.AvailableMetric(used, "MiB", "/proc/meminfo", now)
+		gauge := jtopMemoryGauge(memory, 40)
+		barWidth := renderedGaugeBarWidth(t, gauge)
+		if wantWidth < 0 {
+			wantWidth = barWidth
+		} else if barWidth != wantWidth {
+			t.Fatalf("memory gauge bar width changed from %d to %d at %.0fMiB: %q",
+				wantWidth, barWidth, used, ansi.Strip(gauge))
+		}
+	}
+}
+
+func renderedGaugeBarWidth(t *testing.T, gauge string) int {
+	t.Helper()
+	plain := ansi.Strip(gauge)
+	start := strings.Index(plain, "[")
+	if start < 0 {
+		t.Fatalf("gauge has no opening bracket: %q", plain)
+	}
+	endOffset := strings.Index(plain[start+1:], "]")
+	if endOffset < 0 {
+		t.Fatalf("gauge has no closing bracket: %q", plain)
+	}
+	return ansi.StringWidth(plain[start+1 : start+1+endOffset])
 }
 
 func TestJtopFrequencyGaugeDistinguishesMissingDataFromOffline(t *testing.T) {
