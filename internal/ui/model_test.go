@@ -555,6 +555,39 @@ func TestOverviewOmitsAvailabilityCacheAndTemperatureRow(t *testing.T) {
 	}
 }
 
+func TestOverviewShowsLoadAndUpdatedAtTop(t *testing.T) {
+	uiModel := NewModel(make(chan model.Snapshot), nil)
+	updated, _ := uiModel.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	uiModel = updated.(Model)
+	updated, _ = uiModel.Update(snapshotMsg{snapshot: testSnapshot()})
+	uiModel = updated.(Model)
+
+	lines := strings.Split(ansi.Strip(uiModel.renderJtopAll(22)), "\n")
+	if len(lines) < 2 || !strings.Contains(lines[0], "Load") || !strings.Contains(lines[0], "Updated") {
+		t.Fatalf("overview does not start with Load and Updated on one line:\n%s", strings.Join(lines, "\n"))
+	}
+	if strings.Contains(lines[0], "1800MHz") || !strings.Contains(lines[1], "1800MHz") {
+		t.Fatalf("CPU rows are not placed below Load and Updated:\n%s", strings.Join(lines, "\n"))
+	}
+
+	narrow := ansi.Strip(uiModel.compactOverviewStatus(24))
+	if strings.Contains(narrow, "\n") || !strings.Contains(narrow, "Load") || !strings.Contains(narrow, "Updated") {
+		t.Fatalf("narrow overview status is not kept on one line: %q", narrow)
+	}
+}
+
+func TestOverviewReflowsMemoryAndFanMetricsIntoTwoRows(t *testing.T) {
+	uiModel := NewModel(make(chan model.Snapshot), nil)
+	updated, _ := uiModel.Update(snapshotMsg{snapshot: testSnapshot()})
+	uiModel = updated.(Model)
+
+	lines := strings.Split(ansi.Strip(uiModel.compactOverviewMetrics(80)), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], "Mem") || !strings.Contains(lines[0], "Swp") ||
+		!strings.Contains(lines[1], "CMA") || !strings.Contains(lines[1], "FAN") {
+		t.Fatalf("overview metrics are not arranged as Mem/Swp and CMA/FAN:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
 func TestOverviewHWEnginesShowsUsageFrequencyAndDashForMissingData(t *testing.T) {
 	now := time.Now()
 	snapshot := testSnapshot()

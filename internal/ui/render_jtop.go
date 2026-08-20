@@ -212,31 +212,66 @@ func (m Model) compactCPUs(width int) string {
 	return strings.Join(lines, "\n")
 }
 
-func (m Model) compactMemory(width int) string {
-	lines := []string{
-		jtopMemoryGauge(m.latest.Memory, width),
-		jtopGauge("Swp", ratioMetric(m.latest.Memory.SwapUsed, m.latest.Memory.SwapTotal),
-			formatMetricPairCompact(m.latest.Memory.SwapUsed, m.latest.Memory.SwapTotal, 0), "", width),
-	}
-	if m.latest.Memory.CMATotal.Status == model.Available {
-		lines = append(lines, jtopGauge("CMA", ratioMetric(m.latest.Memory.CMAUsed, m.latest.Memory.CMATotal),
-			formatMetricPairCompact(m.latest.Memory.CMAUsed, m.latest.Memory.CMATotal, 0), "", width))
-	}
-	return strings.Join(lines, "\n")
-}
-
-func (m Model) compactStatus(width int) string {
-	lines := make([]string, 0, 3)
-	for _, fan := range m.latest.Fans[:min(2, len(m.latest.Fans))] {
-		lines = append(lines, jtopMetricGauge("FAN", fan.PWM, formatMetricCompact(fan.Speed, 0), width))
-	}
-	if len(lines) == 0 {
-		lines = append(lines, jtopGauge("FAN", -1, "", "", width))
-	}
+func (m Model) compactOverviewStatus(width int) string {
 	load := fmt.Sprintf("%s %s %s", formatMetricCompact(m.latest.Load.OneMinute, 2),
 		formatMetricCompact(m.latest.Load.FiveMinutes, 2), formatMetricCompact(m.latest.Load.FifteenMinutes, 2))
-	lines = append(lines, fitLine(jtopLabelStyle.Render("Load"), load, width))
-	lines = append(lines, fitLine(jtopLabelStyle.Render("Updated"), m.latest.Timestamp.Format("15:04:05"), width))
+	loadLabel := jtopLabelStyle.Render("Load")
+	updatedLabel := jtopLabelStyle.Render("Updated")
+	left := loadLabel + " " + load
+	right := updatedLabel + " " + m.latest.Timestamp.Format("15:04:05")
+	if ansi.StringWidth(left)+ansi.StringWidth(right)+1 <= width {
+		return fitLine(left, right, width)
+	}
+
+	// Keep both fields on the same line in narrow terminals by showing the
+	// one-minute load and a minute-precision update time.
+	right = updatedLabel + " " + m.latest.Timestamp.Format("15:04")
+	leftWidth := max(0, width-ansi.StringWidth(right)-1)
+	left = ansi.Truncate(loadLabel, leftWidth, "")
+	if valueWidth := leftWidth - ansi.StringWidth(left) - 1; valueWidth > 0 {
+		left += " " + ansi.Truncate(formatMetricCompact(m.latest.Load.OneMinute, 2), valueWidth, "")
+	}
+	return fitLine(left, right, width)
+}
+
+func (m Model) compactOverviewMetrics(width int) string {
+	metrics := []func(int) string{
+		func(cellWidth int) string {
+			return jtopMemoryGauge(m.latest.Memory, cellWidth)
+		},
+		func(cellWidth int) string {
+			return jtopGauge("Swp", ratioMetric(m.latest.Memory.SwapUsed, m.latest.Memory.SwapTotal),
+				formatMetricPairCompact(m.latest.Memory.SwapUsed, m.latest.Memory.SwapTotal, 0), "", cellWidth)
+		},
+	}
+	if m.latest.Memory.CMATotal.Status == model.Available {
+		metrics = append(metrics, func(cellWidth int) string {
+			return jtopGauge("CMA", ratioMetric(m.latest.Memory.CMAUsed, m.latest.Memory.CMATotal),
+				formatMetricPairCompact(m.latest.Memory.CMAUsed, m.latest.Memory.CMATotal, 0), "", cellWidth)
+		})
+	}
+	for _, fan := range m.latest.Fans[:min(2, len(m.latest.Fans))] {
+		metrics = append(metrics, func(cellWidth int) string {
+			return jtopMetricGauge("FAN", fan.PWM, formatMetricCompact(fan.Speed, 0), cellWidth)
+		})
+	}
+	if len(m.latest.Fans) == 0 {
+		metrics = append(metrics, func(cellWidth int) string {
+			return jtopGauge("FAN", -1, "", "", cellWidth)
+		})
+	}
+
+	leftWidth := width / 2
+	rightWidth := width - leftWidth
+	lines := make([]string, 0, (len(metrics)+1)/2)
+	for index := 0; index < len(metrics); index += 2 {
+		left := metrics[index](leftWidth)
+		right := ""
+		if index+1 < len(metrics) {
+			right = metrics[index+1](rightWidth)
+		}
+		lines = append(lines, joinJtopColumns(left, right, leftWidth, rightWidth, false))
+	}
 	return strings.Join(lines, "\n")
 }
 
@@ -257,14 +292,10 @@ func engineShortName(accelerator model.Accelerator) string {
 
 func (m Model) renderJtopAll(height int) string {
 	width := m.width
-	sections := make([]string, 0, 5)
+	sections := make([]string, 0, 6)
+	sections = append(sections, m.compactOverviewStatus(width))
 	sections = append(sections, m.compactCPUs(width))
-
-	leftWidth := width / 2
-	rightWidth := width - leftWidth
-	sections = append(sections, joinJtopColumns(
-		m.compactMemory(leftWidth), m.compactStatus(rightWidth), leftWidth, rightWidth, false,
-	))
+	sections = append(sections, m.compactOverviewMetrics(width))
 
 	used := 0
 	for _, section := range sections {
