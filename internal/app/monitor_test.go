@@ -142,7 +142,7 @@ func TestMonitorRunsOnlyCollectorsInScope(t *testing.T) {
 	if memorySnapshot.Memory.Total.Status != model.Available {
 		t.Fatalf("memory status = %q", memorySnapshot.Memory.Total.Status)
 	}
-	if reads, globs := systemFS.totals(); reads != 8 || globs != 1 {
+	if reads, globs := systemFS.totals(); reads != 10 || globs != 1 {
 		t.Fatalf("memory scope performed ReadFile=%d Glob=%d", reads, globs)
 	}
 

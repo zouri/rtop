@@ -34,6 +34,17 @@ func TestAnalyzeReportsSourcesAndPermissionWarnings(t *testing.T) {
 	if check := findCheck(t, report, "metric.pressure.memory"); check.Status != StatusPass {
 		t.Fatalf("memory pressure check = %#v", check)
 	}
+	if check := findCheck(t, report, "metric.memory.swappiness"); check.Status != StatusPass || check.Source != "/proc/sys/vm/swappiness" {
+		t.Fatalf("swappiness check = %#v", check)
+	}
+	if check := findCheck(t, report, "metric.memory.swap_backends"); check.Status != StatusPass ||
+		!strings.Contains(check.Message, "file=1") || check.Source != "/proc/swaps" {
+		t.Fatalf("Swap backend check = %#v", check)
+	}
+	if check := findCheck(t, report, "metric.memory.swap_backend0"); check.Status != StatusInfo ||
+		!strings.Contains(check.Message, "/swapfile") || !strings.Contains(check.Message, "priority -2") {
+		t.Fatalf("Swap backend detail = %#v", check)
+	}
 	if check := findCheck(t, report, "metric.gpu.runtime_status"); check.Status != StatusPass || check.Message != "active" {
 		t.Fatalf("GPU runtime check = %#v", check)
 	}
@@ -118,8 +129,9 @@ func completeSnapshot() model.Snapshot {
 		},
 		CPU: model.CPUInfo{Overall: available(10, "%", "/proc/stat")},
 		Memory: model.MemoryInfo{
-			Total:    available(8000, "MiB", "/proc/meminfo"),
-			CMATotal: available(512, "MiB", "/proc/meminfo"),
+			Total:      available(8000, "MiB", "/proc/meminfo"),
+			Swappiness: available(60, "", "/proc/sys/vm/swappiness"),
+			CMATotal:   available(512, "MiB", "/proc/meminfo"),
 			Pressure: model.PressureInfo{Memory: model.PressureResource{
 				Some: model.PressureWindow{Avg10: available(1.25, "%", "/proc/pressure/memory")},
 			}},

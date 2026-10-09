@@ -20,6 +20,14 @@ type SystemFS interface {
 	Glob(pattern string) ([]string, error)
 }
 
+// WritableSystemFS is implemented by system filesystems that can explicitly
+// opt in to tuning operations. Metric collectors only depend on SystemFS and
+// therefore remain read-only.
+type WritableSystemFS interface {
+	SystemFS
+	WriteFile(path string, data []byte) error
+}
+
 // RootFS maps absolute system paths below Root. Root "/" accesses the live
 // system, while a testdata directory provides a virtual procfs/sysfs tree.
 type RootFS struct {
@@ -47,6 +55,49 @@ func MustNew(root string) *RootFS {
 
 func (f *RootFS) ReadFile(path string) ([]byte, error) {
 	return os.ReadFile(f.resolve(path))
+}
+
+// WriteFile updates an existing procfs/sysfs node below Root. O_CREATE is
+// deliberately omitted: a typo or unsupported kernel interface must never
+// create a regular file when Root points at a fixture or container tree.
+func (f *RootFS) WriteFile(path string, data []byte) error {
+	target, err := f.resolveWrite(path)
+	if err != nil {
+		return err
+	}
+	file, err := os.OpenFile(target, os.O_WRONLY|os.O_TRUNC, 0)
+	if err != nil {
+		return err
+	}
+	written, writeErr := file.Write(data)
+	closeErr := file.Close()
+	if writeErr != nil {
+		return writeErr
+	}
+	if written != len(data) {
+		return fs.ErrInvalid
+	}
+	return closeErr
+}
+
+func (f *RootFS) resolveWrite(path string) (string, error) {
+	target := f.resolve(path)
+	if f.root == string(filepath.Separator) {
+		return target, nil
+	}
+	evaluated, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		return "", err
+	}
+	root, err := filepath.EvalSymlinks(f.root)
+	if err != nil {
+		return "", err
+	}
+	relative, err := filepath.Rel(root, evaluated)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", &fs.PathError{Op: "write", Path: path, Err: fs.ErrPermission}
+	}
+	return evaluated, nil
 }
 
 func (f *RootFS) ReadDir(path string) ([]os.DirEntry, error) {

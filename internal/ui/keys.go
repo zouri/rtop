@@ -6,24 +6,29 @@ import (
 )
 
 type keyMap struct {
-	Up         key.Binding
-	Down       key.Binding
-	Previous   key.Binding
-	Next       key.Binding
-	All        key.Binding
-	CPU        key.Binding
-	Memory     key.Binding
-	Engines    key.Binding
-	Processes  key.Binding
-	Info       key.Binding
-	Help       key.Binding
-	Back       key.Binding
-	Details    key.Binding
-	SortCPU    key.Binding
-	SortMemory key.Binding
-	Paths      key.Binding
-	Refresh    key.Binding
-	Quit       key.Binding
+	Up           key.Binding
+	Down         key.Binding
+	Previous     key.Binding
+	Next         key.Binding
+	All          key.Binding
+	CPU          key.Binding
+	Memory       key.Binding
+	Engines      key.Binding
+	Processes    key.Binding
+	Control      key.Binding
+	Info         key.Binding
+	Help         key.Binding
+	Back         key.Binding
+	Details      key.Binding
+	SortCPU      key.Binding
+	SortMemory   key.Binding
+	Paths        key.Binding
+	Performance  key.Binding
+	Powersave    key.Binding
+	SwapTune     key.Binding
+	SwapSizeTune key.Binding
+	Refresh      key.Binding
+	Quit         key.Binding
 }
 
 func newKeyMap() keyMap {
@@ -64,9 +69,13 @@ func newKeyMap() keyMap {
 			key.WithKeys("5"),
 			key.WithHelp("5", "processes"),
 		),
+		Control: key.NewBinding(
+			key.WithKeys("6"),
+			key.WithHelp("6", "CTRL"),
+		),
 		Info: key.NewBinding(
-			key.WithKeys("6", "i"),
-			key.WithHelp("6/i", "info"),
+			key.WithKeys("7", "i"),
+			key.WithHelp("7/i", "info"),
 		),
 		Help: key.NewBinding(
 			key.WithKeys("?"),
@@ -92,6 +101,22 @@ func newKeyMap() keyMap {
 			key.WithKeys("p"),
 			key.WithHelp("p", "show/hide paths"),
 		),
+		Performance: key.NewBinding(
+			key.WithKeys("p"),
+			key.WithHelp("p", "performance"),
+		),
+		Powersave: key.NewBinding(
+			key.WithKeys("e"),
+			key.WithHelp("e", "powersave"),
+		),
+		SwapTune: key.NewBinding(
+			key.WithKeys("s"),
+			key.WithHelp("s", "swappiness"),
+		),
+		SwapSizeTune: key.NewBinding(
+			key.WithKeys("c"),
+			key.WithHelp("c", "Swap capacity"),
+		),
 		Refresh: key.NewBinding(
 			key.WithKeys("r"),
 			key.WithHelp("r", "refresh"),
@@ -109,7 +134,7 @@ func (k keyMap) ShortHelp() []key.Binding {
 
 func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.All, k.CPU, k.Memory, k.Engines, k.Processes, k.Info},
+		{k.All, k.CPU, k.Memory, k.Engines, k.Processes, k.Control, k.Info},
 		{k.Previous, k.Next, k.Up, k.Down, k.SortCPU, k.SortMemory, k.Paths, k.Details},
 		{k.Refresh, k.Help, k.Back, k.Quit},
 	}

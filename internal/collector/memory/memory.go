@@ -10,12 +10,14 @@ import (
 	"time"
 
 	"rtop/internal/model"
+	swapinfo "rtop/internal/swap"
 	"rtop/internal/sysfs"
 )
 
 const (
-	meminfoPath = "/proc/meminfo"
-	loadavgPath = "/proc/loadavg"
+	meminfoPath    = "/proc/meminfo"
+	loadavgPath    = "/proc/loadavg"
+	swappinessPath = "/proc/sys/vm/swappiness"
 )
 
 type LoadValues struct {
@@ -173,6 +175,9 @@ func NewCollector(systemFS sysfs.SystemFS) *Collector {
 func (c *Collector) Collect() (model.MemoryInfo, model.LoadInfo, []model.Warning) {
 	timestamp := time.Now()
 	memoryInfo, memoryWarning := c.collectMemory(timestamp)
+	memoryInfo.Swappiness = c.collectSwappiness(timestamp)
+	swapDevices, swapWarning := c.collectSwapDevices(timestamp)
+	memoryInfo.SwapDevices = swapDevices
 	loadInfo, loadWarning := c.collectLoad(timestamp)
 	pressure, pressureWarnings := c.collectPressure(timestamp)
 	zram, zramWarnings := c.collectZRAM(timestamp)
@@ -185,9 +190,39 @@ func (c *Collector) Collect() (model.MemoryInfo, model.LoadInfo, []model.Warning
 	if loadWarning != nil {
 		warnings = append(warnings, *loadWarning)
 	}
+	if swapWarning != nil {
+		warnings = append(warnings, *swapWarning)
+	}
 	warnings = append(warnings, pressureWarnings...)
 	warnings = append(warnings, zramWarnings...)
 	return memoryInfo, loadInfo, warnings
+}
+
+func (c *Collector) collectSwapDevices(timestamp time.Time) ([]model.SwapDevice, *model.Warning) {
+	entries, err := swapinfo.Discover(c.fs)
+	if err != nil {
+		status := sysfs.StatusForError(err)
+		if status == model.Unsupported {
+			return []model.SwapDevice{}, nil
+		}
+		return []model.SwapDevice{}, &model.Warning{Component: "swap", Message: swapinfo.ProcSwapsPath + ": " + err.Error()}
+	}
+	return swapinfo.ToModel(entries, timestamp), nil
+}
+
+func (c *Collector) collectSwappiness(timestamp time.Time) model.Metric {
+	data, err := c.fs.ReadFile(swappinessPath)
+	if err != nil {
+		return model.MissingMetric(sysfs.StatusForError(err), "", swappinessPath, err.Error(), timestamp)
+	}
+	value, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || value < 0 || value > 200 {
+		if err == nil {
+			err = fmt.Errorf("value %d is outside the Linux range 0-200", value)
+		}
+		return model.MissingMetric(model.Unavailable, "", swappinessPath, err.Error(), timestamp)
+	}
+	return model.AvailableMetric(float64(value), "", swappinessPath, timestamp)
 }
 
 func (c *Collector) collectMemory(timestamp time.Time) (model.MemoryInfo, *model.Warning) {
@@ -488,8 +523,8 @@ func unavailableMemory(timestamp time.Time, status model.MetricStatus, message s
 	return model.MemoryInfo{
 		Total: metric(), Used: metric(), Free: metric(), Shared: metric(), Buffers: metric(),
 		Cache: metric(), BufferCache: metric(), Available: metric(), SwapTotal: metric(),
-		SwapUsed: metric(), SwapFree: metric(), SwapCached: metric(), CMATotal: metric(),
-		CMAUsed: metric(), CMAFree: metric(), ZRAM: []model.ZRAMDevice{},
+		SwapUsed: metric(), SwapFree: metric(), SwapCached: metric(), Swappiness: metric(), CMATotal: metric(),
+		CMAUsed: metric(), CMAFree: metric(), SwapDevices: []model.SwapDevice{}, ZRAM: []model.ZRAMDevice{},
 	}
 }
 

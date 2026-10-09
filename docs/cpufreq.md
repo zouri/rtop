@@ -38,6 +38,7 @@ rtop 优先使用 `related_cpus` 建立完整映射；节点缺失或内容为�
 | `cpuinfo_min_freq` | kHz | 硬件支持的最低频率 |
 | `cpuinfo_max_freq` | kHz | 硬件支持的最高频率 |
 | `scaling_governor` | 文本 | 当前 policy 使用的 governor，例如 `schedutil` |
+| `scaling_available_governors` | 文本列表 | 当前 policy 可选择的 governor；部分厂商驱动可能不提供 |
 
 rtop 使用 `scaling_cur_freq` 作为动态显示值，因为它是 CPUFreq 标准 policy
 接口中普遍可用的节点。这里显示的是该 policy 的频率，不应被解释为每个核心都有
@@ -110,6 +111,26 @@ CPUFreq sysfs，两者是独立数据源。rtop 使用以下状态：
 未知范围。`OFF` 不再用于表达 CPU 频率数据缺失。若未来展示真正的 CPU hotplug
 状态，应单独读取 `cpuN/online` 并明确显示 `OFFLINE`。
 
+## 性能与省电模式调优
+
+rtop 将“性能模式”和“省电模式”分别映射到 Linux CPUFreq 的 `performance` 与
+`powersave` governor，不自动使用 `schedutil`、`ondemand` 等其他策略代替。执行：
+
+```sh
+sudo rtop tune cpu performance
+sudo rtop tune cpu powersave
+```
+
+也可以在 TUI 中按 `6` 进入 `CTRL` 页面，再按 `p` 或 `e`。同一页面中的 `s` 调整
+`vm.swappiness`，`c` 则按运行时探测结果调整总 Swap 容量，详见
+[swap.md](swap.md)。rtop 会先发现所有 policy
+并读取 `scaling_available_governors`（驱动未提供该可选节点时以实际写入结果为准）；
+只有全部 policy 通过预检后才开始修改。每次写入后会重新读取校验，发生失败时按
+相反顺序恢复已经修改的 policy。
+
+调优只影响当前内核运行时状态，重启、发行版的电源管理守护进程或热管理策略都
+可能再次改变 governor。
+
 ## 实机只读核查
 
 下面的命令不会修改调频设置：
@@ -120,7 +141,7 @@ for policy in /sys/devices/system/cpu/cpufreq/policy*; do
     printf '\n%s\n' "$policy"
     for node in related_cpus affected_cpus scaling_cur_freq \
         scaling_min_freq scaling_max_freq cpuinfo_min_freq \
-        cpuinfo_max_freq scaling_governor; do
+        cpuinfo_max_freq scaling_governor scaling_available_governors; do
         if [ -r "$policy/$node" ]; then
             printf '  %-24s %s\n' "$node" "$(tr -d '\n' < "$policy/$node")"
         else

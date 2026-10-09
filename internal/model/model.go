@@ -137,11 +137,33 @@ type MemoryInfo struct {
 	SwapUsed    Metric       `json:"swap_used"`
 	SwapFree    Metric       `json:"swap_free"`
 	SwapCached  Metric       `json:"swap_cached"`
+	Swappiness  Metric       `json:"swappiness"`
+	SwapDevices []SwapDevice `json:"swap_devices"`
 	CMATotal    Metric       `json:"cma_total"`
 	CMAUsed     Metric       `json:"cma_used"`
 	CMAFree     Metric       `json:"cma_free"`
 	Pressure    PressureInfo `json:"pressure"`
 	ZRAM        []ZRAMDevice `json:"zram"`
+}
+
+type SwapKind string
+
+const (
+	SwapZRAM  SwapKind = "zram"
+	SwapFile  SwapKind = "file"
+	SwapBlock SwapKind = "block"
+)
+
+// SwapDevice is one currently active entry from /proc/swaps. Size and Used
+// describe usable swap capacity, which can be one page smaller than the
+// backing zram device or file that contains the swap header.
+type SwapDevice struct {
+	Path       string   `json:"path"`
+	Kind       SwapKind `json:"kind"`
+	KernelType string   `json:"kernel_type"`
+	Size       Metric   `json:"size"`
+	Used       Metric   `json:"used"`
+	Priority   int      `json:"priority"`
 }
 
 // FrequencyPolicy describes the active software limits and the immutable

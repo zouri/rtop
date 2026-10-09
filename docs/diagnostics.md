@@ -7,6 +7,10 @@
 - Mali GPU, RKNPU and DMC devfreq driver discovery.
 - debugfs mounting and current-user access.
 - CPU, memory, load, thermal and process sources.
+- Current `vm.swappiness` source and availability.
+- Active Swap backend paths, types, capacities, usage, and priorities from
+  `/proc/swaps` in snapshots and the TUI (`rtop tune swap list` provides the
+  dedicated live view).
 - GPU, NPU and DDR load/frequency sources.
 - CPU and devfreq minimum/maximum frequency and governor sources.
 - Accelerator runtime power-state sources.
@@ -28,6 +32,10 @@ lines or file contents.
 CPUFreq policy mapping, RK3588 shared frequency domains, `Frq` status meanings,
 and read-only inspection commands are documented in
 [cpufreq.md](cpufreq.md).
+
+Runtime Swap backend selection, the pre-`swapoff` memory check, rollback, and
+reboot behavior are documented in [swap.md](swap.md). `doctor` remains
+read-only and never tests a Swap change by disabling a live backend.
 
 ## Common warnings
 

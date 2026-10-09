@@ -101,9 +101,10 @@ func TestCollectorFromFixture(t *testing.T) {
 		"swap used":   {memoryInfo.SwapUsed, 500},
 		"swap free":   {memoryInfo.SwapFree, 1500},
 		"swap cached": {memoryInfo.SwapCached, 0},
+		"swappiness":  {memoryInfo.Swappiness, 60},
 	} {
 		if test.metric.Status != model.Available || test.metric.Value == nil || *test.metric.Value != test.want {
-			t.Errorf("%s = %#v, want %.1f MiB", name, test.metric, test.want)
+			t.Errorf("%s = %#v, want %.1f", name, test.metric, test.want)
 		}
 	}
 	if loadInfo.Tasks.Value == nil || *loadInfo.Tasks.Value != 512 {
@@ -123,6 +124,11 @@ func TestCollectorFromFixture(t *testing.T) {
 		*memoryInfo.ZRAM[0].MemoryUsed.Value != 224 || memoryInfo.ZRAM[0].Algorithm.Value == nil ||
 		*memoryInfo.ZRAM[0].Algorithm.Value != "zstd" {
 		t.Fatalf("zram = %#v", memoryInfo.ZRAM)
+	}
+	if len(memoryInfo.SwapDevices) != 1 || memoryInfo.SwapDevices[0].Kind != model.SwapFile ||
+		memoryInfo.SwapDevices[0].Path != "/swapfile" || memoryInfo.SwapDevices[0].Size.Value == nil ||
+		*memoryInfo.SwapDevices[0].Size.Value != 2000 {
+		t.Fatalf("Swap devices = %#v", memoryInfo.SwapDevices)
 	}
 }
 

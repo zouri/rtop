@@ -18,6 +18,7 @@ import (
 	"rtop/internal/doctor"
 	"rtop/internal/model"
 	"rtop/internal/sysfs"
+	"rtop/internal/tuner"
 	"rtop/internal/ui"
 )
 
@@ -46,7 +47,7 @@ func NewCommand(version, commit, date string, stdout, stderr io.Writer) *cobra.C
 	}
 	command := &cobra.Command{
 		Use:           "rtop",
-		Short:         "Read-only Rockchip Linux system monitor",
+		Short:         "Rockchip Linux system monitor and tuning utility",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Version:       version,
@@ -68,6 +69,7 @@ func NewCommand(version, commit, date string, stdout, stderr io.Writer) *cobra.C
 	command.AddCommand(newInfoCommand(&config, stdout))
 	command.AddCommand(newSnapshotCommand(&config, stdout))
 	command.AddCommand(newDoctorCommand(&config, stdout))
+	command.AddCommand(newTuneCommand(&config, stdout))
 	return command
 }
 
@@ -97,7 +99,26 @@ func runTUI(ctx context.Context, config runtimeConfig, stdout io.Writer) error {
 		monitor.ForceRefresh()
 		scheduler.Refresh()
 	}
-	return ui.RunWithScope(tuiContext, scheduler.Run(tuiContext), refresh, scopeChanged, stdout)
+	controller := tuner.NewWithSwapExecutor(systemFS, tuner.NewLinuxSwapExecutor(config.root, systemFS))
+	tune := func(request ui.TuneRequest) error {
+		if request.CPUProfile != "" {
+			profile, parseErr := tuner.ParseCPUProfile(request.CPUProfile)
+			if parseErr != nil {
+				return parseErr
+			}
+			_, tuneErr := controller.SetCPUProfile(profile)
+			return tuneErr
+		}
+		if request.Swappiness != nil {
+			return controller.SetSwappiness(*request.Swappiness)
+		}
+		if request.SwapSizeBytes != nil {
+			_, tuneErr := controller.SetSwapSize(tuiContext, *request.SwapSizeBytes)
+			return tuneErr
+		}
+		return errors.New("empty tuning request")
+	}
+	return ui.RunWithTuning(tuiContext, scheduler.Run(tuiContext), refresh, scopeChanged, tune, stdout)
 }
 
 func newInfoCommand(config *runtimeConfig, stdout io.Writer) *cobra.Command {
@@ -345,12 +366,18 @@ func printSnapshot(writer io.Writer, snapshot model.Snapshot) {
 		formatMetric(snapshot.Memory.Buffers, 0),
 		formatMetric(snapshot.Memory.Cache, 0),
 	)
-	fmt.Fprintf(writer, "Swap: %s total  %s used  %s free  %s cached\n",
+	fmt.Fprintf(writer, "Swap: %s total  %s used  %s free  %s cached  swappiness %s\n",
 		formatMetric(snapshot.Memory.SwapTotal, 0),
 		formatMetric(snapshot.Memory.SwapUsed, 0),
 		formatMetric(snapshot.Memory.SwapFree, 0),
 		formatMetric(snapshot.Memory.SwapCached, 0),
+		formatMetric(snapshot.Memory.Swappiness, 0),
 	)
+	for _, device := range snapshot.Memory.SwapDevices {
+		fmt.Fprintf(writer, "  Swap backend: %-5s %s total  %s used  priority %d  %s\n",
+			device.Kind, formatMetric(device.Size, 0), formatMetric(device.Used, 0), device.Priority,
+			printableSwapPath(device.Path))
+	}
 	if snapshot.Memory.CMATotal.Status == model.Available {
 		fmt.Fprintf(writer, "CMA: %s used / %s total\n",
 			formatMetric(snapshot.Memory.CMAUsed, 0), formatMetric(snapshot.Memory.CMATotal, 0))

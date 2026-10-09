@@ -82,6 +82,8 @@ func pageTitle(current page) string {
 		return "PROCESSES"
 	case pageInfo:
 		return "INFO"
+	case pageCTRL:
+		return "CTRL"
 	default:
 		return "ALL"
 	}
@@ -133,7 +135,8 @@ func (m Model) renderTabs() string {
 		{"3MEMORY", "3MEM", pageMemory},
 		{"4ENGINES", "4ENG", pageEngines},
 		{"5PROCESSES", "5PROC", pageProcesses},
-		{"6INFO", "6INFO", pageInfo},
+		{"6CTRL", "6CTRL", pageCTRL},
+		{"7INFO", "7INFO", pageInfo},
 	}
 	labels := make([]string, 0, len(tabs)+1)
 	for _, tab := range tabs {
@@ -151,8 +154,12 @@ func (m Model) renderTabs() string {
 	tabLine := " " + strings.Join(labels, "")
 	if m.width < 56 {
 		current := tabs[int(m.page)].narrow
+		menu := "1-7 pages  Quit "
+		if m.width < 34 {
+			menu = "1-7 Quit "
+		}
 		tabLine = " " + lipgloss.NewStyle().Bold(true).Render(current+" ") +
-			lipgloss.NewStyle().Reverse(true).Render("1-6 pages  Quit ")
+			lipgloss.NewStyle().Reverse(true).Render(menu)
 	}
 	used := ansi.StringWidth(tabLine)
 	if used < m.width {
@@ -191,9 +198,95 @@ func (m Model) renderPage(height int) string {
 		return m.renderJtopProcesses(height)
 	case pageInfo:
 		return m.renderJtopInfo(height)
+	case pageCTRL:
+		return m.renderCTRL()
 	default:
 		return m.renderJtopAll(height)
 	}
+}
+
+func (m Model) renderCTRL() string {
+	governors := make(map[string]struct{})
+	for _, core := range m.latest.CPU.Cores {
+		if core.Policy == nil {
+			continue
+		}
+		if governor := formatTextMetricValue(core.Policy.Governor); governor != "" {
+			governors[governor] = struct{}{}
+		}
+	}
+	governorValues := make([]string, 0, len(governors))
+	for governor := range governors {
+		governorValues = append(governorValues, governor)
+	}
+	sort.Strings(governorValues)
+	currentGovernor := fallback(strings.Join(governorValues, ", "), "unavailable")
+
+	lines := []string{
+		titleStyle.Render("SYSTEM CTRL"),
+		"",
+		"These controls write Linux kernel settings and normally require root privileges.",
+		"Monitoring, snapshots, and doctor remain read-only.",
+		"",
+		titleStyle.Render("CPU mode"),
+		"  Current governors: " + currentGovernor,
+		"  [p] performance    [e] powersave",
+		"",
+		titleStyle.Render("Swap policy"),
+		"  Current vm.swappiness: " + formatMetricCompact(m.latest.Memory.Swappiness, 0),
+		"  [s] set vm.swappiness (0-200)",
+		"",
+		titleStyle.Render("Swap capacity"),
+		"  Current total: " + formatMetricCompact(m.latest.Memory.SwapTotal, 0),
+		"  [c] set total capacity (512M, 4G, 1.5GiB, or 0)",
+		"  Active backends (detected from /proc/swaps):",
+	}
+	if len(m.latest.Memory.SwapDevices) == 0 {
+		lines = append(lines, "    none")
+	} else {
+		for _, device := range m.latest.Memory.SwapDevices {
+			lines = append(lines, fmt.Sprintf("    %-5s %8s used %-8s pri %-4d %s",
+				device.Kind, formatMetricCompact(device.Size, 0), formatMetricCompact(device.Used, 0),
+				device.Priority, printableSwapPath(device.Path),
+			))
+		}
+	}
+	lines = append(lines,
+		"  Backend type is detected again when applying; block devices are not repartitioned.",
+	)
+	if m.tuningEditing {
+		value := m.tuningValue
+		if value == "" {
+			value = "_"
+		} else {
+			value += "_"
+		}
+		prompt := "vm.swappiness (0-200): " + value
+		if m.tuningInput == tuningInputSwapSize {
+			prompt = "Total Swap size (512M, 4G, 1.5GiB, or 0): " + value
+		}
+		lines = append(lines, "", prompt, "Enter apply · Backspace edit · Esc cancel")
+	}
+	if m.tuningStatus != "" {
+		status := goodStyle.Render(m.tuningStatus)
+		if m.tuningBusy {
+			status = warnStyle.Render(m.tuningStatus)
+		} else if m.tuningFailed {
+			status = badStyle.Render(m.tuningStatus)
+		}
+		lines = append(lines, "", status)
+	}
+	lines = append(lines, "", mutedStyle.Render("↑/↓ scroll · ←/→ switch pages"))
+	return lipgloss.NewStyle().Width(max(1, m.width-2)).Render(strings.Join(lines, "\n"))
+}
+
+func printableSwapPath(path string) string {
+	if strings.IndexFunc(path, func(character rune) bool {
+		return character <= ' ' || character == 0x7f
+	}) >= 0 {
+		return strconv.QuoteToASCII(path)
+	}
+	return path
 }
 
 func (m *Model) clampScroll() {
@@ -559,6 +652,7 @@ func (m Model) memoryDetailCard(width int) string {
 	builder.WriteString(fmt.Sprintf("\nAvailable  %s", formatMetric(m.latest.Memory.Available, 0)))
 	builder.WriteString(fmt.Sprintf("\nSwap       %s used / %s total", formatMetric(m.latest.Memory.SwapUsed, 0), formatMetric(m.latest.Memory.SwapTotal, 0)))
 	builder.WriteString(fmt.Sprintf("\n            %s free · %s cached", formatMetric(m.latest.Memory.SwapFree, 0), formatMetric(m.latest.Memory.SwapCached, 0)))
+	builder.WriteString(fmt.Sprintf("\nSwappiness %s", formatMetric(m.latest.Memory.Swappiness, 0)))
 	if m.latest.Memory.CMATotal.Status == model.Available {
 		builder.WriteString(fmt.Sprintf("\nCMA        %s used / %s total", formatMetric(m.latest.Memory.CMAUsed, 0), formatMetric(m.latest.Memory.CMATotal, 0)))
 	}

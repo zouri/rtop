@@ -4,7 +4,7 @@
 
 rtop 是面向 Rockchip Linux 平台的终端系统监控工具，目标体验类似 NVIDIA Jetson 平台上的 jtop。
 
-项目采用 Go 实现，优先完整支持 RK3588，再通过动态能力探测扩展至 RK3566、RK3568、RK3576 等 SoC。工具默认只读、无需 root；当部分 sysfs 或 debugfs 指标不可访问时，应正常降级并明确展示原因。
+项目采用 Go 实现，优先完整支持 RK3588，再通过动态能力探测扩展至 RK3566、RK3568、RK3576 等 SoC。工具的监控、快照和诊断默认只读、无需 root；用户显式触发的 CPU/Swap 调优通常需要 root。当部分 procfs、sysfs 或 debugfs 节点不可访问时，应正常降级并明确展示原因。
 
 ## 2. 技术选型
 
@@ -49,9 +49,16 @@ rtop 是面向 Rockchip Linux 平台的终端系统监控工具，目标体验�
 - doctor 环境和权限诊断。
 - 无 root 场景下的正常降级。
 
-### 3.2 暂不支持
+### 3.2 后续版本新增
 
-- 修改 CPU、GPU 或 NPU governor 和频率。
+- 读取并调整 Linux `vm.swappiness`（0–200）。
+- 实时读取 `/proc/swaps` 并调整活动 Swap 总容量；直接处理 zram/swapfile，固定块
+  设备通过受管 swapfile 补齐，包含内存预检、写后校验与事务回滚。
+- 将所有 CPUFreq policy 切换为 `performance` 或 `powersave` governor，包含能力预检、写后校验与失败回滚。
+
+### 3.3 暂不支持
+
+- 任意设置 CPU 频率上下限，以及修改 GPU 或 NPU governor 和频率。
 - 修改风扇 PWM。
 - 结束或管理进程。
 - 每进程 GPU/NPU 使用率。
@@ -60,7 +67,7 @@ rtop 是面向 Rockchip Linux 平台的终端系统监控工具，目标体验�
 - VPU 精确使用率。
 - 每进程 RGA 使用率。
 
-这些功能推迟到后续版本，以确保第一版保持只读、稳定和可移植。
+3.3 中的功能继续推迟，以保持调优写入面足够小且易于审计。
 
 ## 4. 总体架构
 
@@ -80,6 +87,10 @@ rtop 是面向 Rockchip Linux 平台的终端系统监控工具，目标体验�
        ┌────────┼────────┐
        ▼        ▼        ▼
       TUI      JSON     doctor
+       │
+       │ 用户显式调优
+       ▼
+     Tuner ────────────► procfs/sysfs 可写节点及显式 Swap 工具
 ~~~
 
 系统只保留以下层次：
@@ -89,8 +100,10 @@ rtop 是面向 Rockchip Linux 平台的终端系统监控工具，目标体验�
 3. Collectors：按 CPU、内存、进程、温度、功耗风扇和加速器六个当前业务域采集数据；GPU/NPU/DDR 共用一个加速器采集器。
 4. Monitor：并行采集并直接组合不可变系统快照。
 5. Output：命令层直接将统一快照提供给 TUI、JSON 和 doctor。
+6. Tuner：独立于 Collector，仅处理显式的 CPU/Swap 写入；Swap 容量操作每次重新发现
+   活动后端，并负责能力预检、内存余量检查、写后校验与失败回滚。
 
-UI 不直接读取系统文件，Collector 也不包含任何终端展示逻辑。
+UI 不直接读写系统文件，Collector 也不包含任何终端展示逻辑；TUI 只通过命令层注入的调优回调访问 Tuner。
 
 ## 5. 推荐目录结构
 
@@ -103,6 +116,7 @@ rtop/
 │   ├── app/                  # CLI、Monitor 和采样调度
 │   ├── model/                # Snapshot 和指标模型
 │   ├── sysfs/                # 可测试的文件访问封装
+│   ├── tuner/                # 显式调优、校验与回滚
 │   ├── platform/             # Linux/Rockchip 平台识别
 │   ├── collector/
 │   │   ├── accelerator/      # GPU/NPU/DDR devfreq 与 RGA 负载
@@ -136,9 +150,16 @@ type SystemFS interface {
     Readlink(path string) (string, error)
     Glob(pattern string) ([]string, error)
 }
+
+type WritableSystemFS interface {
+    SystemFS
+    WriteFile(path string, data []byte) error
+}
 ~~~
 
-生产环境实现读取真实根文件系统。测试环境将根路径映射到 testdata，从而在没有 Rockchip 硬件的开发机上运行完整采集测试。
+Collector 只依赖只读的 `SystemFS`。只有 Tuner 依赖 `WritableSystemFS`；其实现不创建
+缺失节点，并阻止测试根目录中的符号链接逃逸。测试环境将根路径映射到 testdata，
+从而在没有 Rockchip 硬件的开发机上运行完整采集与调优回滚测试。
 
 ### 6.2 直接依赖具体采集器
 
@@ -192,6 +213,7 @@ const (
 | CPU 使用率 | /proc/stat | 通过两次采样差值计算 |
 | CPU 频率 | `/sys/devices/system/cpu/cpufreq/policy*` | 按 `related_cpus` 映射共享 policy；详见 [cpufreq.md](cpufreq.md) |
 | 内存与 Swap | /proc/meminfo | Linux 通用 |
+| 活动 Swap 后端 | /proc/swaps、/sys/block/zram* | 每次容量操作实时分类 zram、文件和固定块设备 |
 | CMA | /proc/meminfo | 重点观察媒体与 NPU 连续内存余量 |
 | PSI | /proc/pressure | CPU、内存与 I/O 停顿压力 |
 | zram | /sys/block/zram* | 压缩数据、实际内存占用与算法 |
@@ -224,6 +246,10 @@ rtop info                    输出板卡、SoC、内核和驱动信息
 rtop snapshot --json         输出一次 JSON 快照
 rtop snapshot --watch        持续输出机器可读快照
 rtop doctor                  检查节点、驱动、权限和数据源
+rtop tune swap list          列出实时发现的活动 Swap 后端
+rtop tune swap swappiness 10 调整运行时 Swap 倾向
+rtop tune swap size 4G       调整活动 Swap 总容量
+rtop tune cpu powersave      切换全部 CPUFreq policy
 ~~~
 
 doctor 至少检查：
@@ -249,10 +275,12 @@ doctor 只给出诊断信息和修复建议，不自动 mount、chmod 或修改�
 - PROCESSES：进程 CPU、内存和线程数排名，并可查看选中进程详情。
 - INFO：SoC、板卡、内核、驱动、指标来源和诊断信息。
 - HELP：使用覆盖层展示，不离开当前页面，也不改变采集范围。
+- CTRL：展示 CPU governor、swappiness 和实时 Swap 后端；`p/e` 切换 CPU 模式，
+  `s` 输入 swappiness，`c` 输入目标总 Swap 容量。
 
 建议快捷键：
 
-- 1～6：切换 ALL、CPU、MEMORY、ENGINES、PROCESSES 和 INFO。
+- 1～7：切换 ALL、CPU、MEMORY、ENGINES、PROCESSES、CTRL 和 INFO。
 - 上下方向键：选择进程或列表项。
 - c：按 CPU 排序。
 - m：按内存排序。

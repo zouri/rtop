@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -27,7 +28,7 @@ func TestCommandJSONModesAgainstFixture(t *testing.T) {
 		{
 			name:     "snapshot",
 			args:     []string{"--root", root, "--cpu-sample", "1ns", "snapshot", "--json"},
-			contains: []string{`"cpu":`, `"memory":`, `"free":`, `"shared":`, `"buff_cache":`, `"swap_free":`, `"swap_cached":`, `"accelerators":`, `"pressure":`, `"cma_total":`, `"zram":`, `"trips":`, `"cooling_devices":`, `"runtime_status":`, `"power_sensors":`, `"fans":`},
+			contains: []string{`"cpu":`, `"memory":`, `"free":`, `"shared":`, `"buff_cache":`, `"swap_free":`, `"swap_cached":`, `"swappiness":`, `"swap_devices":`, `"kind": "file"`, `"accelerators":`, `"pressure":`, `"cma_total":`, `"zram":`, `"trips":`, `"cooling_devices":`, `"runtime_status":`, `"power_sensors":`, `"fans":`},
 		},
 		{
 			name:     "snapshot without processes",
@@ -100,12 +101,18 @@ func TestPrintSnapshotIncludesFreeMemoryBreakdown(t *testing.T) {
 		Total: metric(8000), Used: metric(4000), Free: metric(1000), Shared: metric(64),
 		Buffers: metric(250), Cache: metric(2125), BufferCache: metric(2375), Available: metric(4000),
 		SwapTotal: metric(2000), SwapUsed: metric(500), SwapFree: metric(1500), SwapCached: metric(32),
+		Swappiness: model.AvailableMetric(60, "", "/proc/sys/vm/swappiness", now),
+		SwapDevices: []model.SwapDevice{{
+			Path: "/dev/zram0", Kind: model.SwapZRAM, KernelType: "partition",
+			Size: metric(1024), Used: metric(128), Priority: 100,
+		}},
 	}})
 	view := output.String()
 	for _, expected := range []string{
 		"1000MiB free", "64MiB shared", "2375MiB buff/cache", "4000MiB available",
 		"250MiB buffers", "2125MiB cache", "2000MiB total", "500MiB used",
-		"1500MiB free", "32MiB cached",
+		"1500MiB free", "32MiB cached", "swappiness 60",
+		"Swap backend: zram", "1024MiB total", "priority 100", "/dev/zram0",
 	} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("snapshot output is missing %q:\n%s", expected, view)
@@ -181,6 +188,79 @@ func TestCommandRejectsRemovedLogLevel(t *testing.T) {
 	_, _, err := executeTestCommand("--log-level", "warn", "info")
 	if err == nil || !strings.Contains(err.Error(), "unknown flag: --log-level") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestTuneCommands(t *testing.T) {
+	root := t.TempDir()
+	writeCommandFixture(t, root, "/proc/sys/vm/swappiness", "60\n")
+	writeCommandFixture(t, root, "/proc/swaps", "Filename Type Size Used Priority\n/swapfile file 1048576 262144 -2\n")
+	for _, name := range []string{"policy0", "policy4"} {
+		base := "/sys/devices/system/cpu/cpufreq/" + name
+		writeCommandFixture(t, root, base+"/scaling_governor", "schedutil\n")
+		writeCommandFixture(t, root, base+"/scaling_available_governors", "performance powersave schedutil\n")
+	}
+
+	stdout, stderr, err := executeTestCommand("--root", root, "tune", "swap", "swappiness", "10")
+	if err != nil || stderr != "" || !strings.Contains(stdout, "vm.swappiness set to 10") {
+		t.Fatalf("swap stdout=%q stderr=%q err=%v", stdout, stderr, err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "proc", "sys", "vm", "swappiness"))
+	if err != nil || string(data) != "10" {
+		t.Fatalf("swappiness data=%q err=%v", data, err)
+	}
+
+	stdout, stderr, err = executeTestCommand("--root", root, "tune", "swap", "list")
+	if err != nil || stderr != "" || !strings.Contains(stdout, "Total Swap: 1GiB") ||
+		!strings.Contains(stdout, "file\t1GiB\t256MiB\t-2\t/swapfile") {
+		t.Fatalf("swap list stdout=%q stderr=%q err=%v", stdout, stderr, err)
+	}
+
+	// A no-op capacity request exercises runtime discovery without invoking
+	// swapoff against the fixture root.
+	stdout, stderr, err = executeTestCommand("--root", root, "tune", "swap", "size", "1G")
+	if err != nil || stderr != "" || !strings.Contains(stdout, "1GiB -> 1GiB (no_change") {
+		t.Fatalf("swap size stdout=%q stderr=%q err=%v", stdout, stderr, err)
+	}
+
+	stdout, stderr, err = executeTestCommand("--root", root, "tune", "cpu", "performance")
+	if err != nil || stderr != "" || !strings.Contains(stdout, "2/2 policies changed") {
+		t.Fatalf("cpu stdout=%q stderr=%q err=%v", stdout, stderr, err)
+	}
+	for _, name := range []string{"policy0", "policy4"} {
+		path := filepath.Join(root, "sys", "devices", "system", "cpu", "cpufreq", name, "scaling_governor")
+		data, readErr := os.ReadFile(path)
+		if readErr != nil || string(data) != "performance" {
+			t.Fatalf("%s data=%q err=%v", name, data, readErr)
+		}
+	}
+}
+
+func TestTuneCommandsRejectInvalidValues(t *testing.T) {
+	for _, test := range []struct {
+		args    []string
+		message string
+	}{
+		{args: []string{"tune", "swap", "swappiness", "201"}, message: "between 0 and 200"},
+		{args: []string{"tune", "swap", "swappiness", "many"}, message: "must be an integer"},
+		{args: []string{"tune", "swap", "size", "0.5MiB"}, message: "at least 1MiB"},
+		{args: []string{"tune", "cpu", "turbo"}, message: "must be \"performance\" or \"powersave\""},
+	} {
+		_, _, err := executeTestCommand(test.args...)
+		if err == nil || !strings.Contains(err.Error(), test.message) {
+			t.Fatalf("execute %v error=%v, want %q", test.args, err, test.message)
+		}
+	}
+}
+
+func writeCommandFixture(t *testing.T, root, logicalPath, value string) {
+	t.Helper()
+	path := filepath.Join(root, strings.TrimPrefix(filepath.Clean(logicalPath), string(filepath.Separator)))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(value), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -163,6 +164,7 @@ func TestPageCollectionScopesAndNotifications(t *testing.T) {
 		{pageEngines, model.CollectAccelerators},
 		{pageProcesses, model.CollectProcesses},
 		{pageInfo, model.CollectOverview},
+		{pageCTRL, model.CollectCPU | model.CollectMemory},
 	}
 	for _, test := range tests {
 		if got := scopeForPage(test.page); got != test.want {
@@ -233,6 +235,202 @@ func TestHelpIsOverlayAndDoesNotChangeCollectionScope(t *testing.T) {
 	}
 }
 
+func TestCTRLPageUsesNormalNavigationAndControlScope(t *testing.T) {
+	var scopes []model.CollectionScope
+	uiModel := NewModelWithTuning(
+		make(chan model.Snapshot), nil,
+		func(scope model.CollectionScope) { scopes = append(scopes, scope) },
+		func(TuneRequest) error { return nil },
+	)
+	uiModel.setPage(pageProcesses)
+	updated, command := uiModel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	uiModel = updated.(Model)
+	if command != nil || uiModel.page != pageProcesses {
+		t.Fatalf("t key changed page=%d command=%v", uiModel.page, command != nil)
+	}
+
+	updated, command = uiModel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'6'}})
+	uiModel = updated.(Model)
+	if command == nil {
+		t.Fatal("opening CTRL did not request control metrics")
+	}
+	command()
+	if uiModel.page != pageCTRL || len(scopes) != 1 || scopes[0] != model.CollectCPU|model.CollectMemory {
+		t.Fatalf("CTRL page=%d scopes=%v", uiModel.page, scopes)
+	}
+
+	updated, command = uiModel.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	uiModel = updated.(Model)
+	if command != nil || uiModel.page != pageCTRL {
+		t.Fatalf("Esc changed CTRL page=%d command=%v", uiModel.page, command != nil)
+	}
+
+	updated, command = uiModel.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	uiModel = updated.(Model)
+	if command == nil {
+		t.Fatal("leaving CTRL did not request the next page scope")
+	}
+	command()
+	if uiModel.page != pageProcesses || len(scopes) != 2 || scopes[1] != model.CollectProcesses {
+		t.Fatalf("page after left=%d scopes=%v", uiModel.page, scopes)
+	}
+
+	updated, command = uiModel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'7'}})
+	uiModel = updated.(Model)
+	if command == nil {
+		t.Fatal("opening INFO did not request overview metrics")
+	}
+	command()
+	if uiModel.page != pageInfo || len(scopes) != 3 || scopes[2] != model.CollectOverview {
+		t.Fatalf("INFO page=%d scopes=%v", uiModel.page, scopes)
+	}
+}
+
+func TestCTRLPageAppliesCPUAndSwapControlsThenRefreshes(t *testing.T) {
+	var requests []TuneRequest
+	refreshed := 0
+	uiModel := NewModelWithTuning(
+		make(chan model.Snapshot),
+		func() { refreshed++ },
+		nil,
+		func(request TuneRequest) error {
+			requests = append(requests, request)
+			return nil
+		},
+	)
+	updated, _ := uiModel.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	uiModel = updated.(Model)
+	updated, _ = uiModel.Update(snapshotMsg{snapshot: testSnapshot()})
+	uiModel = updated.(Model)
+
+	updated, command := uiModel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'6'}})
+	uiModel = updated.(Model)
+	if command != nil || uiModel.page != pageCTRL {
+		t.Fatalf("CTRL page=%d command=%v", uiModel.page, command != nil)
+	}
+	view := ansi.Strip(uiModel.View())
+	for _, expected := range []string{
+		"SYSTEM CTRL", "schedutil", "Current vm.swappiness: 60", "Current total: 2000MiB",
+		"zram", "/dev/zram0", "block devices are not", "repartitioned",
+	} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("tuning view is missing %q:\n%s", expected, view)
+		}
+	}
+
+	updated, command = uiModel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	uiModel = updated.(Model)
+	if command == nil || !uiModel.tuningBusy || len(requests) != 0 {
+		t.Fatalf("CPU tune busy=%v requests=%d command=%v", uiModel.tuningBusy, len(requests), command != nil)
+	}
+	updated, blockedCommand := uiModel.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	uiModel = updated.(Model)
+	if blockedCommand != nil || uiModel.page != pageCTRL {
+		t.Fatalf("busy CTRL switched page=%d command=%v", uiModel.page, blockedCommand != nil)
+	}
+	updated, refreshCommand := uiModel.Update(command())
+	uiModel = updated.(Model)
+	if len(requests) != 1 || requests[0].CPUProfile != "performance" || uiModel.tuningBusy || refreshCommand == nil {
+		t.Fatalf("CPU requests=%#v busy=%v refresh=%v", requests, uiModel.tuningBusy, refreshCommand != nil)
+	}
+	refreshCommand()
+	if refreshed != 1 || uiModel.tuningStatus != "CPU mode set to performance" {
+		t.Fatalf("refreshed=%d status=%q", refreshed, uiModel.tuningStatus)
+	}
+
+	updated, _ = uiModel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	uiModel = updated.(Model)
+	updated, blockedCommand = uiModel.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	uiModel = updated.(Model)
+	if blockedCommand != nil || uiModel.page != pageCTRL || !uiModel.tuningEditing {
+		t.Fatalf("editing CTRL switched page=%d editing=%v command=%v", uiModel.page, uiModel.tuningEditing, blockedCommand != nil)
+	}
+	updated, _ = uiModel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("120")})
+	uiModel = updated.(Model)
+	updated, command = uiModel.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	uiModel = updated.(Model)
+	if command == nil || !uiModel.tuningBusy {
+		t.Fatalf("swap tune busy=%v command=%v", uiModel.tuningBusy, command != nil)
+	}
+	updated, refreshCommand = uiModel.Update(command())
+	uiModel = updated.(Model)
+	if len(requests) != 2 || requests[1].Swappiness == nil || *requests[1].Swappiness != 120 {
+		t.Fatalf("swap requests=%#v", requests)
+	}
+	refreshCommand()
+	if refreshed != 2 || uiModel.tuningStatus != "vm.swappiness set to 120" {
+		t.Fatalf("refreshed=%d status=%q", refreshed, uiModel.tuningStatus)
+	}
+
+	updated, _ = uiModel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	uiModel = updated.(Model)
+	updated, _ = uiModel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("1.5GiB")})
+	uiModel = updated.(Model)
+	updated, command = uiModel.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	uiModel = updated.(Model)
+	if command == nil || !uiModel.tuningBusy {
+		t.Fatalf("capacity tune busy=%v command=%v", uiModel.tuningBusy, command != nil)
+	}
+	updated, refreshCommand = uiModel.Update(command())
+	uiModel = updated.(Model)
+	if len(requests) != 3 || requests[2].SwapSizeBytes == nil || *requests[2].SwapSizeBytes != 1536<<20 {
+		t.Fatalf("capacity requests=%#v", requests)
+	}
+	refreshCommand()
+	if refreshed != 3 || uiModel.tuningStatus != "Total Swap set to 1.50GiB" {
+		t.Fatalf("refreshed=%d status=%q", refreshed, uiModel.tuningStatus)
+	}
+}
+
+func TestCTRLPageReportsValidationAndWriteErrors(t *testing.T) {
+	uiModel := NewModelWithTuning(
+		make(chan model.Snapshot), nil, nil,
+		func(TuneRequest) error { return errors.New("permission denied") },
+	)
+	uiModel.setPage(pageCTRL)
+	uiModel.tuningEditing = true
+	uiModel.tuningValue = "201"
+	updated, command := uiModel.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	uiModel = updated.(Model)
+	if command != nil || !uiModel.tuningFailed || !strings.Contains(uiModel.tuningStatus, "0 to 200") {
+		t.Fatalf("validation status=%q failed=%v command=%v", uiModel.tuningStatus, uiModel.tuningFailed, command != nil)
+	}
+
+	uiModel.tuningEditing = true
+	uiModel.tuningInput = tuningInputSwapSize
+	uiModel.tuningValue = "0.5MiB"
+	updated, command = uiModel.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	uiModel = updated.(Model)
+	if command != nil || !uiModel.tuningFailed || !strings.Contains(uiModel.tuningStatus, "at least 1MiB") {
+		t.Fatalf("capacity validation status=%q failed=%v command=%v", uiModel.tuningStatus, uiModel.tuningFailed, command != nil)
+	}
+
+	uiModel.tuningEditing = false
+	updated, command = uiModel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	uiModel = updated.(Model)
+	updated, refreshCommand := uiModel.Update(command())
+	uiModel = updated.(Model)
+	if refreshCommand != nil || !uiModel.tuningFailed || !strings.Contains(uiModel.tuningStatus, "permission denied") {
+		t.Fatalf("write status=%q failed=%v refresh=%v", uiModel.tuningStatus, uiModel.tuningFailed, refreshCommand != nil)
+	}
+}
+
+func TestCTRLPageScrollsInSmallTerminal(t *testing.T) {
+	uiModel := NewModelWithTuning(make(chan model.Snapshot), nil, nil, func(TuneRequest) error { return nil })
+	updated, _ := uiModel.Update(tea.WindowSizeMsg{Width: 24, Height: 8})
+	uiModel = updated.(Model)
+	updated, _ = uiModel.Update(snapshotMsg{snapshot: testSnapshot()})
+	uiModel = updated.(Model)
+	updated, _ = uiModel.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'6'}})
+	uiModel = updated.(Model)
+	updated, _ = uiModel.Update(tea.KeyMsg{Type: tea.KeyDown})
+	uiModel = updated.(Model)
+	if uiModel.scrollOffset != 1 {
+		t.Fatalf("scroll offset=%d, want 1", uiModel.scrollOffset)
+	}
+	assertViewFitsTerminal(t, uiModel)
+}
+
 func TestProcessPathShortcutTogglesExecutablePaths(t *testing.T) {
 	snapshot := testSnapshot()
 	snapshot.Processes = append(snapshot.Processes, model.ProcessInfo{
@@ -280,7 +478,7 @@ func TestViewNeverExceedsTerminalWidth(t *testing.T) {
 			uiModel = updated.(Model)
 			updated, _ = uiModel.Update(snapshotMsg{snapshot: testSnapshot()})
 			uiModel = updated.(Model)
-			for _, currentPage := range []page{pageAll, pageCPU, pageMemory, pageEngines, pageProcesses, pageInfo} {
+			for _, currentPage := range []page{pageAll, pageCPU, pageMemory, pageEngines, pageProcesses, pageCTRL, pageInfo} {
 				uiModel.setPage(currentPage)
 				for _, showPath := range []bool{false, true} {
 					uiModel.showProcessPath = showPath
@@ -342,6 +540,7 @@ func TestPageTabsRenderOnBottomLine(t *testing.T) {
 	}{
 		{current: pageAll, label: "1ALL"},
 		{current: pageProcesses, label: "5PROC"},
+		{current: pageCTRL, label: "6CTRL"},
 	} {
 		uiModel.setPage(test.current)
 		lines := strings.Split(ansi.Strip(uiModel.View()), "\n")
@@ -463,6 +662,32 @@ func TestJtopPageCyclingKeys(t *testing.T) {
 	if uiModel.page != pageCPU || notifications[len(notifications)-1] != scopeForPage(pageCPU) {
 		t.Fatalf("left arrow selected page=%d scopes=%v", uiModel.page, notifications)
 	}
+
+	uiModel.setPage(pageProcesses)
+	updated, command = uiModel.Update(tea.KeyMsg{Type: tea.KeyRight})
+	uiModel = updated.(Model)
+	command()
+	if uiModel.page != pageCTRL || notifications[len(notifications)-1] != scopeForPage(pageCTRL) {
+		t.Fatalf("right arrow skipped CTRL page=%d scopes=%v", uiModel.page, notifications)
+	}
+	updated, command = uiModel.Update(tea.KeyMsg{Type: tea.KeyRight})
+	uiModel = updated.(Model)
+	command()
+	if uiModel.page != pageInfo || notifications[len(notifications)-1] != scopeForPage(pageInfo) {
+		t.Fatalf("right arrow skipped INFO after CTRL page=%d scopes=%v", uiModel.page, notifications)
+	}
+	updated, command = uiModel.Update(tea.KeyMsg{Type: tea.KeyRight})
+	uiModel = updated.(Model)
+	command()
+	if uiModel.page != pageAll || notifications[len(notifications)-1] != scopeForPage(pageAll) {
+		t.Fatalf("right arrow did not wrap from INFO page=%d scopes=%v", uiModel.page, notifications)
+	}
+	updated, command = uiModel.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	uiModel = updated.(Model)
+	command()
+	if uiModel.page != pageInfo || notifications[len(notifications)-1] != scopeForPage(pageInfo) {
+		t.Fatalf("left arrow did not wrap to INFO page=%d scopes=%v", uiModel.page, notifications)
+	}
 }
 
 func TestJtopMenuUsesCompactNativeLabels(t *testing.T) {
@@ -473,10 +698,35 @@ func TestJtopMenuUsesCompactNativeLabels(t *testing.T) {
 	uiModel = updated.(Model)
 	lines := strings.Split(ansi.Strip(uiModel.View()), "\n")
 	last := strings.TrimSpace(lines[len(lines)-1])
-	for _, label := range []string{"1ALL", "2CPU", "3MEMORY", "4ENGINES", "5PROCESSES", "6INFO", "Quit"} {
+	for _, label := range []string{"1ALL", "2CPU", "3MEMORY", "4ENGINES", "5PROCESSES", "6CTRL", "7INFO", "Quit"} {
 		if !strings.Contains(last, label) {
 			t.Fatalf("jtop menu is missing %q: %q", label, last)
 		}
+	}
+	for _, unwanted := range []string{"tTUNE", "TUNING"} {
+		if strings.Contains(last, unwanted) {
+			t.Fatalf("jtop menu still contains %q: %q", unwanted, last)
+		}
+	}
+}
+
+func TestNarrowMenuAdvertisesCTRLAsSixthPage(t *testing.T) {
+	uiModel := NewModel(make(chan model.Snapshot), nil)
+	updated, _ := uiModel.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
+	uiModel = updated.(Model)
+	updated, _ = uiModel.Update(snapshotMsg{snapshot: testSnapshot()})
+	uiModel = updated.(Model)
+
+	lines := strings.Split(ansi.Strip(uiModel.View()), "\n")
+	last := strings.TrimSpace(lines[len(lines)-1])
+	if !strings.Contains(last, "1-7 pages") || strings.Contains(last, "Tune") {
+		t.Fatalf("narrow menu does not advertise seven normal pages: %q", last)
+	}
+	uiModel.setPage(pageCTRL)
+	lines = strings.Split(ansi.Strip(uiModel.View()), "\n")
+	last = strings.TrimSpace(lines[len(lines)-1])
+	if !strings.Contains(last, "6CTRL") {
+		t.Fatalf("narrow CTRL menu is missing its numeric tab: %q", last)
 	}
 }
 
@@ -1153,9 +1403,15 @@ func testSnapshot() model.Snapshot {
 			SwapUsed:    model.AvailableMetric(500, "MiB", "/proc/meminfo", now),
 			SwapFree:    model.AvailableMetric(1500, "MiB", "/proc/meminfo", now),
 			SwapCached:  model.AvailableMetric(32, "MiB", "/proc/meminfo", now),
-			CMATotal:    model.AvailableMetric(500, "MiB", "/proc/meminfo", now),
-			CMAUsed:     model.AvailableMetric(125, "MiB", "/proc/meminfo", now),
-			CMAFree:     model.AvailableMetric(375, "MiB", "/proc/meminfo", now),
+			Swappiness:  model.AvailableMetric(60, "", "/proc/sys/vm/swappiness", now),
+			SwapDevices: []model.SwapDevice{{
+				Path: "/dev/zram0", Kind: model.SwapZRAM, KernelType: "partition",
+				Size: model.AvailableMetric(1024, "MiB", "/proc/swaps", now),
+				Used: model.AvailableMetric(128, "MiB", "/proc/swaps", now), Priority: 100,
+			}},
+			CMATotal: model.AvailableMetric(500, "MiB", "/proc/meminfo", now),
+			CMAUsed:  model.AvailableMetric(125, "MiB", "/proc/meminfo", now),
+			CMAFree:  model.AvailableMetric(375, "MiB", "/proc/meminfo", now),
 			Pressure: model.PressureInfo{
 				CPU: model.PressureResource{Some: model.PressureWindow{Avg10: model.AvailableMetric(0.25, "%", "/proc/pressure/cpu", now)}},
 				Memory: model.PressureResource{

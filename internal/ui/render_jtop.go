@@ -710,6 +710,7 @@ func jtopMemorySummary(memory model.MemoryInfo, width int) string {
 		jtopMemoryMetric("Used", memory.SwapUsed),
 		jtopMemoryMetric("Free", memory.SwapFree),
 		jtopMemoryMetric("Cached", memory.SwapCached),
+		jtopMemoryMetric("Swappiness", memory.Swappiness),
 	}, width)...)
 	return strings.Join(lines, "\n")
 }
@@ -720,7 +721,10 @@ func memoryDetailItems(memory model.MemoryInfo, includeSwapCache bool) []string 
 		jtopMemoryMetric("Cache", memory.Cache),
 	}
 	if includeSwapCache {
-		items = append(items, jtopMemoryMetric("Swap cache", memory.SwapCached))
+		items = append(items,
+			jtopMemoryMetric("Swap cache", memory.SwapCached),
+			jtopMemoryMetric("Swappiness", memory.Swappiness),
+		)
 	}
 	if memory.CMATotal.Status == model.Available {
 		items = append(items, jtopLabelStyle.Render("CMA:")+" "+

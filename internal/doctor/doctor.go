@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"rtop/internal/model"
+	swapinfo "rtop/internal/swap"
 	"rtop/internal/sysfs"
 )
 
@@ -51,6 +52,7 @@ func Analyze(systemFS sysfs.SystemFS, snapshot model.Snapshot) Report {
 	report.Checks = append(report.Checks, kernelBuildCheck(systemFS))
 	report.Checks = append(report.Checks, driverChecks(snapshot.System)...)
 	report.Checks = append(report.Checks, debugFSChecks(systemFS)...)
+	report.Checks = append(report.Checks, swapBackendChecks(systemFS)...)
 	report.Checks = append(report.Checks, snapshotChecks(snapshot)...)
 	for _, check := range report.Checks {
 		switch check.Status {
@@ -65,6 +67,57 @@ func Analyze(systemFS sysfs.SystemFS, snapshot model.Snapshot) Report {
 		}
 	}
 	return report
+}
+
+func swapBackendChecks(systemFS sysfs.SystemFS) []Check {
+	entries, err := swapinfo.Discover(systemFS)
+	if err != nil {
+		return []Check{{
+			ID: "metric.memory.swap_backends", Name: "Active Swap backends", Status: StatusWarning,
+			Message: err.Error(), Source: swapinfo.ProcSwapsPath,
+			Suggestion: "Confirm that procfs is mounted and /proc/swaps is readable.",
+		}}
+	}
+	if len(entries) == 0 {
+		return []Check{{
+			ID: "metric.memory.swap_backends", Name: "Active Swap backends", Status: StatusInfo,
+			Message: "no active Swap backends", Source: swapinfo.ProcSwapsPath,
+		}}
+	}
+	total, err := swapinfo.TotalBytes(entries)
+	if err != nil {
+		return []Check{{
+			ID: "metric.memory.swap_backends", Name: "Active Swap backends", Status: StatusWarning,
+			Message: err.Error(), Source: swapinfo.ProcSwapsPath,
+		}}
+	}
+	kinds := make(map[model.SwapKind]int)
+	for _, entry := range entries {
+		kinds[entry.Kind]++
+	}
+	details := make([]string, 0, len(kinds))
+	for _, kind := range []model.SwapKind{model.SwapZRAM, model.SwapFile, model.SwapBlock} {
+		if kinds[kind] > 0 {
+			details = append(details, fmt.Sprintf("%s=%d", kind, kinds[kind]))
+		}
+	}
+	checks := []Check{{
+		ID: "metric.memory.swap_backends", Name: "Active Swap backends", Status: StatusPass,
+		Message: fmt.Sprintf("%d active, %.2f MiB total (%s)",
+			len(entries), float64(total)/(1024*1024), strings.Join(details, ", ")),
+		Source: swapinfo.ProcSwapsPath,
+	}}
+	for index, entry := range entries {
+		checks = append(checks, Check{
+			ID:   fmt.Sprintf("metric.memory.swap_backend%d", index),
+			Name: fmt.Sprintf("Swap backend %d (%s)", index, entry.Kind), Status: StatusInfo,
+			Message: fmt.Sprintf("%q: %.2f MiB total, %.2f MiB used, priority %d",
+				entry.Path, float64(entry.SizeBytes)/(1024*1024),
+				float64(entry.UsedBytes)/(1024*1024), entry.Priority),
+			Source: swapinfo.ProcSwapsPath,
+		})
+	}
+	return checks
 }
 
 func kernelBuildCheck(systemFS sysfs.SystemFS) Check {
@@ -200,6 +253,7 @@ func snapshotChecks(snapshot model.Snapshot) []Check {
 		metricCheck("metric.cpu", "CPU usage", snapshot.CPU.Overall, true),
 		metricCheck("metric.memory", "Memory", snapshot.Memory.Total, true),
 		metricCheck("metric.load", "Load average", snapshot.Load.OneMinute, true),
+		capabilityMetricCheck("metric.memory.swappiness", "vm.swappiness", snapshot.Memory.Swappiness),
 		capabilityMetricCheck("metric.memory.cma", "CMA accounting", snapshot.Memory.CMATotal),
 		capabilityMetricCheck("metric.pressure.memory", "Memory pressure (PSI)", snapshot.Memory.Pressure.Memory.Some.Avg10),
 	}

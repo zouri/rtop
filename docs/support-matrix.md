@@ -30,6 +30,21 @@ Board voltage, current, power, energy and fan/PWM metrics are likewise
 capability-probed through the standard hwmon ABI. They are reported only when
 the board exposes corresponding channels.
 
+Runtime tuning uses generic Linux interfaces rather than Rockchip-specific
+drivers. `vm.swappiness` adjustment requires a writable `/proc/sys/vm/swappiness`;
+CPU performance/powersave modes require writable CPUFreq policies and the
+corresponding governors. rtop preflights every policy and does not claim tuning
+support when the kernel omits these controls.
+
+Swap capacity tuning is likewise runtime-discovered and platform-independent.
+rtop rereads `/proc/swaps` for each operation, directly rebuilds zram or regular
+swapfiles, and treats partitions, LVM volumes, and encrypted mappings as fixed
+block backends. It never edits partition tables or resizes block devices; an
+rtop-owned `/var/lib/rtop/swapfile` supplies any residual capacity. Support
+therefore depends on sufficient `MemAvailable`, root privileges, the standard
+`swapoff`/`mkswap`/`swapon` tools, and a filesystem that supports swapfiles.
+See [swap.md](swap.md) for the transaction and reboot semantics.
+
 RGA scheduler load is read from the unified Rockchip RGA driver's
 `/sys/kernel/debug/rkrga/load` or `/proc/rkrga/load` interface. Older RGA/RGA2
 drivers that do not implement this accounting are reported as `unsupported`.

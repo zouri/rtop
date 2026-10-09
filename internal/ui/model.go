@@ -2,15 +2,18 @@ package ui
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"sort"
+	"strconv"
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"rtop/internal/model"
+	"rtop/internal/tuner"
 )
 
 type page int
@@ -21,6 +24,7 @@ const (
 	pageMemory
 	pageEngines
 	pageProcesses
+	pageCTRL
 	pageInfo
 )
 
@@ -31,10 +35,29 @@ const (
 	sortMemory
 )
 
+type tuningInput int
+
+const (
+	tuningInputNone tuningInput = iota
+	tuningInputSwappiness
+	tuningInputSwapSize
+)
+
+// TuneRequest is the intentionally small set of mutations exposed by the TUI.
+// Exactly one field is set for each request.
+type TuneRequest struct {
+	CPUProfile    string
+	Swappiness    *int
+	SwapSizeBytes *uint64
+}
+
+type TuneFunc func(TuneRequest) error
+
 type Model struct {
 	snapshots     <-chan model.Snapshot
 	refresh       func()
 	scopeChanged  func(model.CollectionScope)
+	tune          TuneFunc
 	latest        model.Snapshot
 	hasData       bool
 	closed        bool
@@ -45,6 +68,12 @@ type Model struct {
 	height             int
 	page               page
 	showHelp           bool
+	tuningEditing      bool
+	tuningBusy         bool
+	tuningStatus       string
+	tuningFailed       bool
+	tuningValue        string
+	tuningInput        tuningInput
 	showProcessDetail  bool
 	showProcessPath    bool
 	processSort        processSort
@@ -76,6 +105,11 @@ type snapshotMsg struct {
 
 type snapshotsClosedMsg struct{}
 
+type tuningFinishedMsg struct {
+	label string
+	err   error
+}
+
 func NewModel(snapshots <-chan model.Snapshot, refresh func()) Model {
 	return NewModelWithScope(snapshots, refresh, nil)
 }
@@ -85,10 +119,19 @@ func NewModelWithScope(
 	refresh func(),
 	scopeChanged func(model.CollectionScope),
 ) Model {
+	return NewModelWithTuning(snapshots, refresh, scopeChanged, nil)
+}
+
+func NewModelWithTuning(
+	snapshots <-chan model.Snapshot,
+	refresh func(),
+	scopeChanged func(model.CollectionScope),
+	tune TuneFunc,
+) Model {
 	helper := help.New()
 	helper.ShowAll = false
 	return Model{
-		snapshots: snapshots, refresh: refresh, scopeChanged: scopeChanged,
+		snapshots: snapshots, refresh: refresh, scopeChanged: scopeChanged, tune: tune,
 		keys: newKeyMap(), help: helper, coreHistory: make(map[int][]float64),
 		unprivileged: os.Geteuid() != 0,
 	}
@@ -134,9 +177,26 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case snapshotsClosedMsg:
 		m.closed = true
 		return m, tea.Quit
+	case tuningFinishedMsg:
+		m.tuningBusy = false
+		m.tuningEditing = false
+		m.tuningInput = tuningInputNone
+		m.tuningFailed = message.err != nil
+		if message.err != nil {
+			m.tuningStatus = "Failed: " + message.err.Error()
+			return m, nil
+		}
+		m.tuningStatus = message.label
+		return m, m.refreshCommand()
 	case tea.KeyMsg:
+		if m.page == pageCTRL && m.tuningBusy && key.Matches(message, m.keys.Quit) {
+			return m, nil
+		}
 		if key.Matches(message, m.keys.Quit) {
 			return m, tea.Quit
+		}
+		if m.page == pageCTRL && (m.tuningEditing || m.tuningBusy) {
+			return m.updateCTRL(message)
 		}
 		if key.Matches(message, m.keys.Help) {
 			m.showHelp = !m.showHelp
@@ -181,14 +241,12 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.setPage(pageInfo)
 			return m, m.scopeCommand()
 		}
+		if key.Matches(message, m.keys.Control) {
+			m.setPage(pageCTRL)
+			return m, m.scopeCommand()
+		}
 		if key.Matches(message, m.keys.Refresh) {
-			refresh := m.refresh
-			return m, func() tea.Msg {
-				if refresh != nil {
-					refresh()
-				}
-				return nil
-			}
+			return m, m.refreshCommand()
 		}
 
 		if m.showHelp {
@@ -200,6 +258,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.clampScroll()
 			return m, nil
+		}
+		if m.page == pageCTRL {
+			return m.updateCTRL(message)
 		}
 
 		if key.Matches(message, m.keys.Paths) &&
@@ -243,6 +304,127 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) updateCTRL(message tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if key.Matches(message, m.keys.Back) {
+		if m.tuningBusy {
+			return m, nil
+		}
+		if m.tuningEditing {
+			m.tuningEditing = false
+			m.tuningInput = tuningInputNone
+			m.tuningStatus = ""
+			return m, nil
+		}
+		return m, nil
+	}
+	if key.Matches(message, m.keys.Up) {
+		m.scrollOffset--
+		m.clampScroll()
+		return m, nil
+	}
+	if key.Matches(message, m.keys.Down) {
+		m.scrollOffset++
+		m.clampScroll()
+		return m, nil
+	}
+	if m.tuningBusy {
+		return m, nil
+	}
+	if m.tuningEditing {
+		if key.Matches(message, m.keys.Details) {
+			if m.tuningInput == tuningInputSwapSize {
+				value, err := tuner.ParseSwapSize(m.tuningValue)
+				if err != nil {
+					m.tuningFailed = true
+					m.tuningStatus = "Swap size: " + err.Error()
+					return m, nil
+				}
+				return m.beginTuning(
+					TuneRequest{SwapSizeBytes: &value},
+					fmt.Sprintf("Total Swap set to %s", tuner.FormatSwapSize(value)),
+				)
+			}
+			value, err := strconv.Atoi(m.tuningValue)
+			if err != nil || value < 0 || value > 200 {
+				m.tuningFailed = true
+				m.tuningStatus = "Swappiness must be an integer from 0 to 200."
+				return m, nil
+			}
+			return m.beginTuning(
+				TuneRequest{Swappiness: &value},
+				fmt.Sprintf("vm.swappiness set to %d", value),
+			)
+		}
+		if message.Type == tea.KeyBackspace || message.Type == tea.KeyDelete {
+			if len(m.tuningValue) > 0 {
+				m.tuningValue = m.tuningValue[:len(m.tuningValue)-1]
+			}
+			return m, nil
+		}
+		for _, character := range message.Runes {
+			if m.tuningInput == tuningInputSwapSize {
+				if validSwapSizeRune(character) && len(m.tuningValue) < 32 {
+					m.tuningValue += string(character)
+				}
+			} else if character >= '0' && character <= '9' && len(m.tuningValue) < 3 {
+				m.tuningValue += string(character)
+			}
+		}
+		return m, nil
+	}
+
+	switch {
+	case key.Matches(message, m.keys.Performance):
+		return m.beginTuning(TuneRequest{CPUProfile: "performance"}, "CPU mode set to performance")
+	case key.Matches(message, m.keys.Powersave):
+		return m.beginTuning(TuneRequest{CPUProfile: "powersave"}, "CPU mode set to powersave")
+	case key.Matches(message, m.keys.SwapTune):
+		m.tuningEditing = true
+		m.tuningInput = tuningInputSwappiness
+		m.tuningFailed = false
+		m.tuningStatus = ""
+		m.tuningValue = ""
+		return m, nil
+	case key.Matches(message, m.keys.SwapSizeTune):
+		m.tuningEditing = true
+		m.tuningInput = tuningInputSwapSize
+		m.tuningFailed = false
+		m.tuningStatus = ""
+		m.tuningValue = ""
+		return m, nil
+	}
+	return m, nil
+}
+
+func validSwapSizeRune(character rune) bool {
+	return character >= '0' && character <= '9' || character == '.' ||
+		character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z'
+}
+
+func (m Model) beginTuning(request TuneRequest, success string) (tea.Model, tea.Cmd) {
+	m.tuningBusy = true
+	m.tuningFailed = false
+	m.tuningStatus = "Applying…"
+	tune := m.tune
+	return m, func() tea.Msg {
+		if tune == nil {
+			return tuningFinishedMsg{err: fmt.Errorf("system control is unavailable in this session")}
+		}
+		return tuningFinishedMsg{label: success, err: tune(request)}
+	}
+}
+
+func (m Model) refreshCommand() tea.Cmd {
+	refresh := m.refresh
+	if refresh == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		refresh()
+		return nil
+	}
+}
+
 func sameProcessSlice(left, right []model.ProcessInfo) bool {
 	if len(left) != len(right) {
 		return false
@@ -262,8 +444,11 @@ func (m *Model) setPage(next page) {
 }
 
 func (m Model) scopeCommand() tea.Cmd {
+	return m.scopeChangeCommand(scopeForPage(m.page))
+}
+
+func (m Model) scopeChangeCommand(scope model.CollectionScope) tea.Cmd {
 	changed := m.scopeChanged
-	scope := scopeForPage(m.page)
 	if changed == nil {
 		return nil
 	}
@@ -285,6 +470,8 @@ func scopeForPage(current page) model.CollectionScope {
 		return model.CollectProcesses
 	case pageInfo:
 		return model.CollectOverview
+	case pageCTRL:
+		return model.CollectCPU | model.CollectMemory
 	default:
 		return model.CollectAll
 	}
@@ -519,9 +706,20 @@ func RunWithScope(
 	scopeChanged func(model.CollectionScope),
 	output io.Writer,
 ) error {
+	return RunWithTuning(ctx, snapshots, refresh, scopeChanged, nil, output)
+}
+
+func RunWithTuning(
+	ctx context.Context,
+	snapshots <-chan model.Snapshot,
+	refresh func(),
+	scopeChanged func(model.CollectionScope),
+	tune TuneFunc,
+	output io.Writer,
+) error {
 	output = synchronizedOutputForTerminal(output)
 	program := tea.NewProgram(
-		NewModelWithScope(snapshots, refresh, scopeChanged),
+		NewModelWithTuning(snapshots, refresh, scopeChanged, tune),
 		tea.WithContext(ctx),
 		tea.WithOutput(output),
 		tea.WithAltScreen(),
